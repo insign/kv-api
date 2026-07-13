@@ -1,0 +1,16 @@
+{
+  "name": "kv",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "wrangler d1 migrations apply tasks --remote",
+    "deploy": "npm run migrate && wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.110.0"
+  }
+}
