@@ -9,7 +9,6 @@ The API intentionally has no authentication. Anyone who knows an ID can read, ov
 ## Production
 
 - Official endpoint: `https://kv.helio.me`
-- Do not use or restore `tasks-api.helio.me`; it is no longer attached to this Worker.
 - `workers_dev` is disabled to prevent bypassing zone-level controls through a `workers.dev` hostname.
 - Preview URLs are disabled.
 - Worker name: `kv`.
@@ -186,7 +185,6 @@ After deployment:
 5. Verify one safe structured error, such as a root path rejection, without touching unknown IDs.
 6. Read `/:id/version`.
 7. Delete the temporary ID and confirm a subsequent read returns `404`.
-8. Confirm `tasks-api.helio.me` is not attached to the Worker.
 
 Production smoke tests must use a unique valid ID and delete it at the end. Do not inspect, overwrite, or delete unknown existing IDs.
 
