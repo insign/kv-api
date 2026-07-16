@@ -199,6 +199,8 @@ export const DOCS_HTML = `<!doctype html>
     th, td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     th { color: var(--muted); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
     td:first-child { color: var(--accent); font-family: "SFMono-Regular", Consolas, monospace; }
+    .table-wrap { margin-top: 16px; overflow-x: auto; }
+    .table-wrap table { min-width: 820px; }
 
     ul { padding-left: 22px; color: var(--muted); }
     li { margin: 7px 0; }
@@ -229,6 +231,7 @@ export const DOCS_HTML = `<!doctype html>
         <a href="#inicio">Visão geral</a>
         <a href="#primeiros-passos">Primeiros passos</a>
         <a href="#endpoints">Endpoints</a>
+        <a href="#atualizar-valor">Atualizar por caminho</a>
         <a href="#respostas">Respostas</a>
         <a href="#javascript">JavaScript</a>
         <a href="#regras">Regras e limites</a>
@@ -255,7 +258,7 @@ export const DOCS_HTML = `<!doctype html>
       <section id="primeiros-passos">
         <div class="eyebrow">Quick start</div>
         <h2>Primeiros passos</h2>
-        <p>Crie ou substitua um valor com <code>PUT</code>. O corpo pode ser objeto, array, string, número, booleano ou <code>null</code>.</p>
+        <p>Crie ou substitua o documento completo com <code>PUT /:id</code>. Para alterar somente um valor, use <code>PUT /:id/value?path=...</code>. O corpo pode ser objeto, array, string, número, booleano ou <code>null</code>.</p>
 
         <h3>1. Salvar</h3>
         <pre><code>curl -X PUT https://kv.helio.me/minha_tarefa \\
@@ -289,6 +292,11 @@ export const DOCS_HTML = `<!doctype html>
         </article>
 
         <article class="endpoint">
+          <div class="endpoint-head"><span class="method">PUT</span><code>/:id/value?path=&lt;JSON Pointer&gt;</code></div>
+          <div class="endpoint-body"><p>Cria ou substitui um único valor no caminho indicado. Cria objetos ancestrais ausentes, trata arrays com índices explícitos e retorna o item completo atualizado.</p></div>
+        </article>
+
+        <article class="endpoint">
           <div class="endpoint-head"><span class="method delete">DELETE</span><code>/:id</code></div>
           <div class="endpoint-body"><p>Apaga definitivamente o item. Se ele for recriado depois, começará novamente na versão 1.</p></div>
         </article>
@@ -297,6 +305,63 @@ export const DOCS_HTML = `<!doctype html>
           <div class="endpoint-head"><span class="method">OPTIONS</span><code>qualquer caminho</code></div>
           <div class="endpoint-body"><p>Responde ao preflight CORS. São permitidos os headers <code>Content-Type</code>, <code>Authorization</code>, <code>If-None-Match</code> e <code>If-Match</code>.</p></div>
         </article>
+      </section>
+
+      <section id="atualizar-valor">
+        <div class="eyebrow">Set by JSON Pointer</div>
+        <h2>Atualizar um valor por caminho</h2>
+        <p>Envie um único valor JSON bruto para <code>PUT /:id/value</code> e informe o endereço no parâmetro <code>path</code>. Esta operação não é JSON Patch nem JSON Merge Patch: ela cria ou substitui exatamente um valor.</p>
+
+        <h3>Alterar uma folha existente</h3>
+        <pre><code>curl -X PUT \\
+  "https://kv.helio.me/config/value?path=%2Finterface%2Ftema" \\
+  -H "Content-Type: application/json" \\
+  -d '"escuro"'</code></pre>
+
+        <h3>Criar ancestrais ausentes</h3>
+        <pre><code>curl -X PUT \\
+  "https://kv.helio.me/config/value?path=%2Fpreferencias%2Fnotificacoes%2Femail" \\
+  -H "Content-Type: application/json" \\
+  -d 'true'</code></pre>
+
+        <p>Se o ID não existir, ele começa como <code>{}</code>. Objetos ausentes são criados recursivamente. Assim, <code>/items/0/name</code> em um item ausente cria chaves de objeto chamadas <code>items</code>, <code>0</code> e <code>name</code>; a API nunca infere um array a partir de um token numérico.</p>
+
+        <h3>Objetos e arrays</h3>
+        <table>
+          <thead><tr><th>Situação</th><th>Comportamento</th></tr></thead>
+          <tbody>
+            <tr><td>Objeto</td><td>Todo token é uma chave literal, inclusive <code>0</code>, <code>-</code> e a chave vazia.</td></tr>
+            <tr><td>Array existente</td><td>Use <code>0</code> ou um inteiro positivo sem zeros à esquerda. Índices existentes são substituídos.</td></tr>
+            <tr><td>Índice = tamanho</td><td>Adiciona um elemento ao final. Repetir o mesmo índice substitui esse elemento, sem adicionar outro.</td></tr>
+            <tr><td>Índice &gt; tamanho</td><td>Retorna <code>ARRAY_INDEX_OUT_OF_BOUNDS</code>; lacunas não são criadas.</td></tr>
+            <tr><td><code>/-</code> em array</td><td>Retorna <code>INVALID_ARRAY_INDEX</code>. Append por hífen não é suportado.</td></tr>
+            <tr><td>Folha escalar ou <code>null</code></td><td>Pode ser substituída normalmente.</td></tr>
+            <tr><td>Ancestral escalar ou <code>null</code></td><td>Retorna <code>PATH_TYPE_CONFLICT</code>; a API não sobrescreve o bloqueador.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Escaping e codificação</h3>
+        <p>O caminho usa JSON Pointer. Dentro de um segmento, escreva <code>~0</code> para a chave <code>~</code> e <code>~1</code> para a chave <code>/</code>. Primeiro monte o JSON Pointer e depois codifique-o como parâmetro de URL. <code>path=</code> é proibido porque apontaria para o documento completo; <code>path=/</code> é válido e aponta para uma chave vazia.</p>
+        <pre><code>const query = new URLSearchParams({ path: "/a~1b/tema" });
+const response = await fetch(
+  "https://kv.helio.me/config/value?" + query,
+  {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify("escuro"),
+  },
+);</code></pre>
+
+        <h3>Semântica e limites</h3>
+        <ul>
+          <li>Cada gravação aceita incrementa <code>version</code>, mesmo quando o valor final não muda.</li>
+          <li>A resposta contém o item completo com timestamps e o novo valor.</li>
+          <li>O caminho decodificado aceita até 4.096 bytes UTF-8 e 64 segmentos.</li>
+          <li>O corpo e o documento final têm limite de 1.900.000 bytes UTF-8.</li>
+          <li>Uma atualização por caminho pode normalizar espaços insignificantes, mas preserva literais numéricos não alterados, como <code>9007199254740993</code> e <code>1e400</code>.</li>
+          <li><code>PUT /:id</code> continua preservando o texto JSON bruto e substituindo o documento completo.</li>
+          <li>Não há remoção por caminho, múltiplas mutações, inserção no meio de arrays, JSON Patch, JSON Merge Patch ou precondições <code>If-Match</code>.</li>
+        </ul>
       </section>
 
       <section id="respostas">
@@ -359,6 +424,17 @@ if (response.status === 404) {
   const item = await response.json();
   console.log(item.json);
 }</code></pre>
+
+        <h3>Atualizar só um valor</h3>
+        <pre><code>const query = new URLSearchParams({ path: "/interface/tema" });
+const updated = await fetch(
+  "https://kv.helio.me/preferencias/value?" + query,
+  {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify("claro"),
+  },
+).then((response) =&gt; response.json());</code></pre>
       </section>
 
       <section id="regras">
@@ -370,6 +446,9 @@ if (response.status === 404) {
             <tr><td>ID</td><td>De 1 a 100 caracteres: letras ASCII, números, hífen e sublinhado.</td></tr>
             <tr><td>Expressão</td><td><code>^[A-Za-z0-9_-]{1,100}$</code></td></tr>
             <tr><td>Payload</td><td>Máximo de 1.900.000 bytes em UTF-8.</td></tr>
+            <tr><td>Resultado</td><td>Uma mutação por caminho também deve resultar em no máximo 1.900.000 bytes UTF-8.</td></tr>
+            <tr><td>JSON Pointer</td><td>Máximo de 4.096 bytes UTF-8 após decodificar a URL e 64 segmentos; o caminho raiz é proibido.</td></tr>
+            <tr><td>Atualização</td><td><code>PUT /:id</code> substitui tudo; <code>PUT /:id/value</code> cria ou substitui exatamente um valor.</td></tr>
             <tr><td>Rate limit</td><td>30 requisições por IP a cada 10 segundos.</td></tr>
             <tr><td>Cache</td><td>Respostas da API usam <code>Cache-Control: no-store</code>.</td></tr>
             <tr><td>CORS</td><td>Qualquer origem pode chamar a API; <code>OPTIONS</code> responde ao preflight.</td></tr>
@@ -392,24 +471,49 @@ pasta/item     # barra cria outro segmento de rota</code></pre>
 
       <section id="erros">
         <div class="eyebrow">Failures</div>
-        <h2>Erros</h2>
-        <table>
-          <thead><tr><th>Status</th><th>Significado</th></tr></thead>
-          <tbody>
-            <tr><td>400</td><td>ID fora do formato permitido ou corpo JSON inválido.</td></tr>
-            <tr><td>404</td><td>Rota inválida ou ID inexistente.</td></tr>
-            <tr><td>405</td><td>Método HTTP não suportado.</td></tr>
-            <tr><td>413</td><td>Corpo maior que 1.900.000 bytes.</td></tr>
-            <tr><td>429</td><td>Limite de requisições excedido; tente novamente após alguns segundos.</td></tr>
-            <tr><td>500</td><td>Falha interna ao persistir o item.</td></tr>
-          </tbody>
-        </table>
-
-        <h3>Exemplo de ID inexistente</h3>
+        <h2>Contrato de erros</h2>
+        <p>Falhas da API retornam JSON estruturado. <code>code</code> é estável para automação, <code>retryable</code> informa se repetir pode resolver o problema e <code>hint</code> sugere a próxima ação. Campos de contexto variam por código e nunca incluem o documento armazenado.</p>
         <pre><code>{
-  "error": "id não existe",
-  "id": "minha_tarefa"
+  "error": "O caminho atravessa um valor que não é objeto nem array.",
+  "code": "PATH_TYPE_CONFLICT",
+  "retryable": false,
+  "hint": "Substitua primeiro o valor bloqueador por um objeto ou use PUT /:id para substituir o documento completo.",
+  "path": "/perfil/tema",
+  "blocked_at": "/perfil",
+  "actual_type": "string",
+  "required_type": "object_or_array"
 }</code></pre>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Status</th><th><code>code</code></th><th>Contexto adicional</th><th>Próxima ação</th></tr></thead>
+            <tbody>
+              <tr><td><code>400</code></td><td><code>INVALID_ID</code></td><td><code>id</code>, <code>regra</code></td><td>Use de 1 a 100 letras ASCII, números, hífens ou sublinhados.</td></tr>
+              <tr><td><code>404</code></td><td><code>INVALID_ROUTE</code></td><td><code>path</code></td><td>Consulte <code>GET /</code> e corrija a rota.</td></tr>
+              <tr><td><code>404</code></td><td><code>ITEM_NOT_FOUND</code></td><td><code>id</code></td><td>Confira o ID ou crie o item com <code>PUT /:id</code>.</td></tr>
+              <tr><td><code>405</code></td><td><code>METHOD_NOT_ALLOWED</code></td><td>Cabeçalho <code>Allow</code></td><td>Use um dos métodos listados em <code>Allow</code>.</td></tr>
+              <tr><td><code>400</code></td><td><code>INVALID_JSON</code></td><td>Nenhum</td><td>Envie exatamente um valor JSON válido.</td></tr>
+              <tr><td><code>400</code></td><td><code>INVALID_UTF8</code></td><td>Nenhum</td><td>Codifique o corpo como UTF-8 válido.</td></tr>
+              <tr><td><code>413</code></td><td><code>PAYLOAD_TOO_LARGE</code></td><td><code>max_bytes</code> e, quando conhecido, <code>received_bytes</code></td><td>Reduza o corpo para no máximo 1.900.000 bytes.</td></tr>
+              <tr><td><code>400</code></td><td><code>MISSING_PATH_PARAMETER</code></td><td>Nenhum</td><td>Envie exatamente um parâmetro <code>path</code>.</td></tr>
+              <tr><td><code>400</code></td><td><code>DUPLICATE_PATH_PARAMETER</code></td><td><code>path_count</code></td><td>Remova os parâmetros <code>path</code> extras.</td></tr>
+              <tr><td><code>400</code></td><td><code>INVALID_JSON_POINTER</code></td><td><code>path</code>, <code>reason</code></td><td>Comece com <code>/</code> e use somente os escapes <code>~0</code> e <code>~1</code>.</td></tr>
+              <tr><td><code>400</code></td><td><code>ROOT_PATH_NOT_ALLOWED</code></td><td>Nenhum</td><td>Use <code>PUT /:id</code> para substituir o documento completo.</td></tr>
+              <tr><td><code>414</code></td><td><code>PATH_TOO_LONG</code></td><td><code>path_bytes</code>, <code>max_path_bytes</code></td><td>Reduza o caminho decodificado para até 4.096 bytes UTF-8.</td></tr>
+              <tr><td><code>400</code></td><td><code>PATH_TOO_DEEP</code></td><td><code>segments</code>, <code>max_segments</code></td><td>Reduza o caminho para até 64 segmentos.</td></tr>
+              <tr><td><code>409</code></td><td><code>PATH_TYPE_CONFLICT</code></td><td><code>path</code>, <code>blocked_at</code>, <code>actual_type</code>, <code>required_type</code></td><td>Troque o ancestral bloqueador por objeto ou array antes da mutação.</td></tr>
+              <tr><td><code>409</code></td><td><code>INVALID_ARRAY_INDEX</code></td><td><code>path</code>, <code>token</code> e regra ou limite aceito</td><td>Use índice canônico entre zero e o tamanho atual do array.</td></tr>
+              <tr><td><code>409</code></td><td><code>ARRAY_INDEX_OUT_OF_BOUNDS</code></td><td><code>path</code>, <code>index</code>, <code>array_length</code></td><td>Use um índice existente ou o tamanho atual para adicionar ao final.</td></tr>
+              <tr><td><code>409</code></td><td><code>AMBIGUOUS_PATH</code></td><td>Nenhum</td><td>Normalize chaves duplicadas com substituição completa.</td></tr>
+              <tr><td><code>409</code></td><td><code>STORED_JSON_INVALID</code></td><td>Nenhum</td><td>Substitua o documento completo por JSON válido.</td></tr>
+              <tr><td><code>409</code></td><td><code>WRITE_CONFLICT</code></td><td><code>retryable: true</code></td><td>Leia a versão atual e tente novamente.</td></tr>
+              <tr><td><code>422</code></td><td><code>RESULT_TOO_LARGE</code></td><td><code>result_bytes</code>, <code>max_bytes</code></td><td>Reduza o valor ou substitua o documento por uma versão menor.</td></tr>
+              <tr><td><code>500</code></td><td><code>STORE_FAILED</code></td><td>Nenhum</td><td>Consulte o item antes de repetir; o estado da gravação pode ser incerto.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>O WAF pode retornar <code>429</code> antes de a requisição chegar à API. Nesse caso, aguarde o período de bloqueio e tente novamente; o corpo não segue necessariamente o contrato estruturado acima.</p>
       </section>
 
       <footer>

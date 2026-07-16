@@ -31,6 +31,19 @@ curl "https://kv.helio.me/minha_tarefa"
 curl "https://kv.helio.me/minha_tarefa/version"
 ```
 
+### Atualizar um valor por caminho
+
+```bash
+curl -X PUT \
+  "https://kv.helio.me/minha_tarefa/value?path=%2Ffeito" \
+  -H "Content-Type: application/json" \
+  -d 'true'
+```
+
+O parâmetro `path` usa [JSON Pointer (RFC 6901)](https://www.rfc-editor.org/rfc/rfc6901). A rota cria ou substitui exatamente um valor e retorna o item completo. Ela cria objetos ancestrais ausentes; em arrays existentes, aceita índices canônicos e permite adicionar no final usando o tamanho atual do array. Não há remoção por caminho, acréscimo com `/-`, criação de lacunas, JSON Patch ou JSON Merge Patch.
+
+Para chaves que contêm `~` ou `/`, use `~0` ou `~1` dentro do segmento e depois codifique o caminho como parâmetro de URL. `path=` não é aceito porque representa a raiz; use `PUT /:id` para substituir o documento completo. `path=/` é válido e representa uma chave vazia.
+
 ### Apagar
 
 ```bash
@@ -52,7 +65,7 @@ curl -X DELETE "https://kv.helio.me/minha_tarefa"
 }
 ```
 
-O corpo pode ser qualquer JSON válido: objeto, array, string, número, booleano ou `null`. Um `PUT` substitui completamente o valor anterior e incrementa `version`.
+O corpo pode ser qualquer JSON válido: objeto, array, string, número, booleano ou `null`. `PUT /:id` substitui completamente o valor anterior. `PUT /:id/value` altera um único valor. Ambos incrementam `version` em toda gravação aceita, mesmo quando o resultado não muda.
 
 ## Rotas
 
@@ -62,15 +75,20 @@ O corpo pode ser qualquer JSON válido: objeto, array, string, número, booleano
 | `GET` | `/:id` | Consulta um item |
 | `GET` | `/:id/version` | Consulta somente a versão |
 | `PUT` | `/:id` | Cria ou substitui um item |
+| `PUT` | `/:id/value?path=<JSON Pointer>` | Cria ou substitui um valor por caminho |
 | `DELETE` | `/:id` | Apaga um item |
 
 ## Limites
 
 - IDs: 1 a 100 letras ASCII, números, hífens ou sublinhados.
 - Expressão válida: `^[A-Za-z0-9_-]{1,100}$`.
-- Payload máximo: `1.900.000` bytes em UTF-8.
+- Corpo máximo: `1.900.000` bytes em UTF-8.
+- Resultado máximo de uma mutação por caminho: `1.900.000` bytes em UTF-8.
+- JSON Pointer: até `4.096` bytes UTF-8 após decodificar a URL e `64` segmentos.
 - Rate limit: 30 requisições por IP a cada 10 segundos.
-- Não há listagem, busca, expiração, histórico ou merge parcial.
+- Não há listagem, busca, expiração, histórico, remoção por caminho ou mutações múltiplas.
+
+Erros da API incluem `error`, um `code` estável, `retryable`, `hint` e, quando útil, contexto limitado como `path`, `blocked_at`, `array_length` ou limites em bytes. Consulte a [documentação completa](https://kv.helio.me/) para a tabela normativa de códigos e próximas ações.
 
 ## Desenvolvimento
 

@@ -277,6 +277,34 @@ test("serve documentação completa na raiz", async () => {
   assert.match(html, /https:\/\/kv\.helio\.me/);
   assert.match(html, /API pública e sem autenticação/);
   assert.match(html, /GET<\/span><code>\/:id\/version/);
+  assert.match(html, /PUT<\/span><code>\/:id\/value\?path=/);
+  assert.match(html, /URLSearchParams\(\{ path: "\/a~1b\/tema" \}\)/);
+  for (const code of [
+    "INVALID_ID",
+    "INVALID_ROUTE",
+    "ITEM_NOT_FOUND",
+    "METHOD_NOT_ALLOWED",
+    "INVALID_JSON",
+    "INVALID_UTF8",
+    "PAYLOAD_TOO_LARGE",
+    "MISSING_PATH_PARAMETER",
+    "DUPLICATE_PATH_PARAMETER",
+    "INVALID_JSON_POINTER",
+    "ROOT_PATH_NOT_ALLOWED",
+    "PATH_TOO_LONG",
+    "PATH_TOO_DEEP",
+    "PATH_TYPE_CONFLICT",
+    "INVALID_ARRAY_INDEX",
+    "ARRAY_INDEX_OUT_OF_BOUNDS",
+    "AMBIGUOUS_PATH",
+    "STORED_JSON_INVALID",
+    "WRITE_CONFLICT",
+    "RESULT_TOO_LARGE",
+    "STORE_FAILED",
+  ]) {
+    assert.match(html, new RegExp(code));
+  }
+  assert.match(html, /retryable/);
   assert.match(html, /1\.900\.000 bytes/);
   assert.doesNotMatch(html, /<script|<link[^>]+rel="stylesheet"|<img[^>]+src="https?:/i);
   assert.doesNotMatch(html, /tasks-api\.helio\.me/);
