@@ -69,6 +69,7 @@ function applyJsonSet(rawJson, path, replacementJson) {
 }
 
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
+const nestedArray = (depth) => "[".repeat(depth) + "0" + "]".repeat(depth);
 
 function materializeJsonSet(rawJson, path, replacementJson) {
   const result = applyJsonSet(rawJson, path, replacementJson);
@@ -300,6 +301,8 @@ test("serve documentação completa na raiz", async () => {
     "STORED_JSON_INVALID",
     "WRITE_CONFLICT",
     "RESULT_TOO_LARGE",
+    "RESULT_TOO_DEEP",
+    "STORED_JSON_TOO_DEEP",
     "STORE_FAILED",
   ]) {
     assert.match(html, new RegExp(code));
@@ -612,6 +615,56 @@ test("PUT /:id/value aplica limites distintos ao corpo e ao resultado", async ()
     413,
     "PAYLOAD_TOO_LARGE",
   );
+});
+
+test("PUT /:id/value impede resultados além do limite de aninhamento JSON1", async () => {
+  const db = new MockD1([
+    {
+      id: "profundo_armazenado",
+      version: 1,
+      json: nestedArray(1001),
+      created_at: null,
+      updated_at: null,
+      is_valid_json: 0,
+    },
+  ]);
+
+  const atLimit = await call(db, valuePath("profundidade_limite", "/valor"), {
+    method: "PUT",
+    body: nestedArray(999),
+  });
+  assert.equal(atLimit.status, 200);
+  assert.equal(db.items.get("profundidade_limite").version, 1);
+
+  const delimitersInString = await call(db, valuePath("profundidade_string", "/valor"), {
+    method: "PUT",
+    body: JSON.stringify('[{"\\'.repeat(1001)),
+  });
+  assert.equal(delimitersInString.status, 200);
+
+  const tooDeep = await assertError(
+    await call(db, valuePath("profundidade_excedida", "/valor"), {
+      method: "PUT",
+      body: nestedArray(1000),
+    }),
+    422,
+    "RESULT_TOO_DEEP",
+  );
+  assert.equal(tooDeep.result_depth, 1001);
+  assert.equal(tooDeep.max_depth, 1000);
+  assert.equal(db.items.has("profundidade_excedida"), false);
+
+  const storedTooDeep = await assertError(
+    await call(db, valuePath("profundo_armazenado", "/valor"), {
+      method: "PUT",
+      body: "1",
+    }),
+    409,
+    "STORED_JSON_TOO_DEEP",
+  );
+  assert.equal(storedTooDeep.document_depth, 1001);
+  assert.equal(storedTooDeep.max_depth, 1000);
+  assert.equal(db.items.get("profundo_armazenado").version, 1);
 });
 
 test("PUT /:id/value preserva created_at nulo de registros legados", async () => {

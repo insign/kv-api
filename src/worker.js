@@ -7,6 +7,7 @@ import {
 } from "./json-path.js";
 
 const MAX_JSON_BYTES = 1_900_000;
+const MAX_JSON_NESTING_DEPTH = 1000;
 const VALID_ID = /^[A-Za-z0-9_-]{1,100}$/;
 const MAX_WRITE_ATTEMPTS = 3;
 
@@ -102,6 +103,8 @@ const ERROR_STATUS = {
   STORED_JSON_INVALID: 409,
   WRITE_CONFLICT: 409,
   RESULT_TOO_LARGE: 422,
+  RESULT_TOO_DEEP: 422,
+  STORED_JSON_TOO_DEEP: 409,
   STORE_FAILED: 500,
 };
 
@@ -111,6 +114,15 @@ function resultTooLarge(resultBytes) {
     "O documento resultante excede o limite de 1,9 MB.",
     "Reduza o valor ou substitua o documento completo por uma versão menor usando PUT /:id.",
     { result_bytes: resultBytes, max_bytes: MAX_JSON_BYTES },
+  );
+}
+
+function resultTooDeep(resultDepth) {
+  return new ApiError(
+    "RESULT_TOO_DEEP",
+    "O documento resultante excede o limite de aninhamento do D1.",
+    `Reduza o resultado para no máximo ${MAX_JSON_NESTING_DEPTH} níveis de objetos e arrays.`,
+    { result_depth: resultDepth, max_depth: MAX_JSON_NESTING_DEPTH },
   );
 }
 
@@ -134,6 +146,32 @@ function isJsonText(value) {
   } catch {
     return false;
   }
+}
+
+function jsonNestingDepth(jsonText) {
+  let depth = 0;
+  let maxDepth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (const character of jsonText) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") {
+      depth += 1;
+      maxDepth = Math.max(maxDepth, depth);
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+    }
+  }
+
+  return maxDepth;
 }
 
 function isItemRow(row, id, version) {
@@ -169,7 +207,27 @@ function isUpdatedItemRow(row, id, version, resultBytes) {
 }
 
 function parseStoredJson(row) {
+  let value;
+  try {
+    value = JSON.parse(row.json);
+  } catch {
+    throw new ApiError(
+      "STORED_JSON_INVALID",
+      "O item armazenado contém JSON inválido.",
+      "Substitua o documento completo por JSON válido usando PUT /:id.",
+    );
+  }
+
   if (!row.is_valid_json) {
+    const documentDepth = jsonNestingDepth(row.json);
+    if (documentDepth > MAX_JSON_NESTING_DEPTH) {
+      throw new ApiError(
+        "STORED_JSON_TOO_DEEP",
+        "O item armazenado excede o limite de aninhamento para atualizações por caminho.",
+        `Substitua o documento completo por JSON com no máximo ${MAX_JSON_NESTING_DEPTH} níveis antes de usar PUT /:id/value.`,
+        { document_depth: documentDepth, max_depth: MAX_JSON_NESTING_DEPTH },
+      );
+    }
     throw new ApiError(
       "STORED_JSON_INVALID",
       "O item armazenado contém JSON inválido.",
@@ -184,15 +242,7 @@ function parseStoredJson(row) {
     );
   }
 
-  try {
-    return JSON.parse(row.json);
-  } catch {
-    throw new ApiError(
-      "STORED_JSON_INVALID",
-      "O item armazenado contém JSON inválido.",
-      "Substitua o documento completo por JSON válido usando PUT /:id.",
-    );
-  }
+  return value;
 }
 
 export async function setJsonValue(db, id, tokens, replacementJson) {
@@ -205,10 +255,14 @@ export async function setJsonValue(db, id, tokens, replacementJson) {
       );
     }
 
+    const replacementDepth = jsonNestingDepth(replacementJson);
+
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
       const row = await db.prepare(INSPECT_ITEM_SQL).bind(id).first();
 
       if (!row) {
+        const resultDepth = tokens.length + replacementDepth;
+        if (resultDepth > MAX_JSON_NESTING_DEPTH) throw resultTooDeep(resultDepth);
         const sqlitePath = `$${tokens.map(sqliteObjectSegment).join("")}`;
         const candidate = await db
           .prepare(MISSING_RESULT_SIZE_SQL)
@@ -240,6 +294,8 @@ export async function setJsonValue(db, id, tokens, replacementJson) {
       }
       const currentValue = parseStoredJson(row);
       const { sqlitePath } = planJsonSetPath(currentValue, tokens);
+      const resultDepth = tokens.length + replacementDepth;
+      if (resultDepth > MAX_JSON_NESTING_DEPTH) throw resultTooDeep(resultDepth);
       const batchResults = await db.batch([
         db
           .prepare(EXISTING_RESULT_SIZE_SQL)

@@ -358,6 +358,8 @@ const response = await fetch(
           <li>A resposta contém o item completo com timestamps e o novo valor.</li>
           <li>O caminho decodificado aceita até 4.096 bytes UTF-8 e 64 segmentos.</li>
           <li>O corpo e o documento final têm limite de 1.900.000 bytes UTF-8.</li>
+          <li>O documento final aceita até 1.000 níveis aninhados de objetos e arrays, limite do parser JSON1 usado pela operação.</li>
+          <li><code>PUT /:id</code> pode armazenar JSON mais profundo, mas ele precisa ser substituído por um documento de até 1.000 níveis antes de aceitar atualizações por caminho.</li>
           <li>Uma atualização por caminho pode normalizar espaços insignificantes, mas preserva literais numéricos não alterados, como <code>9007199254740993</code> e <code>1e400</code>.</li>
           <li><code>PUT /:id</code> continua preservando o texto JSON bruto e substituindo o documento completo.</li>
           <li>Não há remoção por caminho, múltiplas mutações, inserção no meio de arrays, JSON Patch, JSON Merge Patch ou precondições <code>If-Match</code>.</li>
@@ -448,6 +450,7 @@ const updated = await fetch(
             <tr><td>Payload</td><td>Máximo de 1.900.000 bytes em UTF-8.</td></tr>
             <tr><td>Resultado</td><td>Uma mutação por caminho também deve resultar em no máximo 1.900.000 bytes UTF-8.</td></tr>
             <tr><td>JSON Pointer</td><td>Máximo de 4.096 bytes UTF-8 após decodificar a URL e 64 segmentos; o caminho raiz é proibido.</td></tr>
+            <tr><td>Aninhamento por caminho</td><td>O resultado aceita no máximo 1.000 níveis de objetos e arrays, conforme o limite do JSON1.</td></tr>
             <tr><td>Atualização</td><td><code>PUT /:id</code> substitui tudo; <code>PUT /:id/value</code> cria ou substitui exatamente um valor.</td></tr>
             <tr><td>Rate limit</td><td>30 requisições por IP a cada 10 segundos.</td></tr>
             <tr><td>Cache</td><td>Respostas da API usam <code>Cache-Control: no-store</code>.</td></tr>
@@ -506,8 +509,10 @@ pasta/item     # barra cria outro segmento de rota</code></pre>
               <tr><td><code>409</code></td><td><code>ARRAY_INDEX_OUT_OF_BOUNDS</code></td><td><code>path</code>, <code>index</code>, <code>array_length</code></td><td>Use um índice existente ou o tamanho atual para adicionar ao final.</td></tr>
               <tr><td><code>409</code></td><td><code>AMBIGUOUS_PATH</code></td><td>Nenhum</td><td>Normalize chaves duplicadas com substituição completa.</td></tr>
               <tr><td><code>409</code></td><td><code>STORED_JSON_INVALID</code></td><td>Nenhum</td><td>Substitua o documento completo por JSON válido.</td></tr>
+              <tr><td><code>409</code></td><td><code>STORED_JSON_TOO_DEEP</code></td><td><code>document_depth</code>, <code>max_depth</code></td><td>Substitua o documento completo por JSON com até 1.000 níveis.</td></tr>
               <tr><td><code>409</code></td><td><code>WRITE_CONFLICT</code></td><td><code>retryable: true</code></td><td>Leia a versão atual e tente novamente.</td></tr>
               <tr><td><code>422</code></td><td><code>RESULT_TOO_LARGE</code></td><td><code>result_bytes</code>, <code>max_bytes</code></td><td>Reduza o valor ou substitua o documento por uma versão menor.</td></tr>
+              <tr><td><code>422</code></td><td><code>RESULT_TOO_DEEP</code></td><td><code>result_depth</code>, <code>max_depth</code></td><td>Reduza o resultado para até 1.000 níveis de objetos e arrays.</td></tr>
               <tr><td><code>500</code></td><td><code>STORE_FAILED</code></td><td>Nenhum</td><td>Consulte o item antes de repetir; o estado da gravação pode ser incerto.</td></tr>
             </tbody>
           </table>

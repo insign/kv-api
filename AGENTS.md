@@ -114,16 +114,18 @@ Set-by-path mutations necessarily pass through SQLite JSON1 and may normalize in
 - `/-` is rejected for arrays. There is no middle insertion or removal-by-path operation.
 - A scalar or `null` leaf may be replaced. A scalar or `null` ancestor causes `PATH_TYPE_CONFLICT` and is never overwritten implicitly.
 - Every accepted mutation increments `version`, including no-op values. It preserves `created_at`, updates `updated_at`, and returns the complete item envelope.
+- The resulting document may contain at most `1,000` nested object/array levels, matching SQLite JSON1's parser limit. Account for the pointer depth plus the replacement value's depth.
+- Full `PUT /:id` may store deeper standard JSON because it does not use JSON1. Such an item remains readable but path writes return `STORED_JSON_TOO_DEEP` until a shallower full replacement is written.
 - Duplicate object keys make path selection ambiguous and are rejected until the client normalizes the document with `PUT /:id`.
 - JSON Patch, JSON Merge Patch, multiple mutations, and `If-Match` preconditions are out of scope.
 
-Structured API errors always include `error`, `code`, `retryable`, and `hint`. Context fields are code-specific and limited to actionable metadata; never include stored JSON in an error. Stable codes are `INVALID_ID`, `INVALID_ROUTE`, `ITEM_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `INVALID_JSON`, `INVALID_UTF8`, `PAYLOAD_TOO_LARGE`, `MISSING_PATH_PARAMETER`, `DUPLICATE_PATH_PARAMETER`, `INVALID_JSON_POINTER`, `ROOT_PATH_NOT_ALLOWED`, `PATH_TOO_LONG`, `PATH_TOO_DEEP`, `PATH_TYPE_CONFLICT`, `INVALID_ARRAY_INDEX`, `ARRAY_INDEX_OUT_OF_BOUNDS`, `AMBIGUOUS_PATH`, `STORED_JSON_INVALID`, `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, and `STORE_FAILED`. Only `WRITE_CONFLICT` is currently marked `retryable: true`.
+Structured API errors always include `error`, `code`, `retryable`, and `hint`. Context fields are code-specific and limited to actionable metadata; never include stored JSON in an error. Stable codes are `INVALID_ID`, `INVALID_ROUTE`, `ITEM_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `INVALID_JSON`, `INVALID_UTF8`, `PAYLOAD_TOO_LARGE`, `MISSING_PATH_PARAMETER`, `DUPLICATE_PATH_PARAMETER`, `INVALID_JSON_POINTER`, `ROOT_PATH_NOT_ALLOWED`, `PATH_TOO_LONG`, `PATH_TOO_DEEP`, `PATH_TYPE_CONFLICT`, `INVALID_ARRAY_INDEX`, `ARRAY_INDEX_OUT_OF_BOUNDS`, `AMBIGUOUS_PATH`, `STORED_JSON_INVALID`, `STORED_JSON_TOO_DEEP`, `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RESULT_TOO_DEEP`, and `STORE_FAILED`. Only `WRITE_CONFLICT` is currently marked `retryable: true`.
 
 ## Payload Limit
 
 The application limit is exactly `1,900,000` request-body bytes, measured from the UTF-8 stream. Requests over the limit return `413` and the Worker cancels further stream consumption.
 
-The complete JSON result of `PUT /:id/value` has the same `1,900,000`-byte limit. An oversized result returns `422 RESULT_TOO_LARGE`; an oversized request body remains `413 PAYLOAD_TOO_LARGE`.
+The complete JSON result of `PUT /:id/value` has the same `1,900,000`-byte limit and may contain at most `1,000` nested object/array levels. An oversized result returns `422 RESULT_TOO_LARGE`, an over-deep result returns `422 RESULT_TOO_DEEP`, and an oversized request body remains `413 PAYLOAD_TOO_LARGE`.
 
 Do not raise this to 2 MiB or 2,000,000 bytes without changing the storage design. D1's documented maximum for a string, BLOB, or complete row is 2,000,000 bytes. The row also contains the ID, version, timestamps, and SQLite record overhead, so the JSON value needs safety margin. Supporting full 2 MiB payloads would require chunking across rows or moving values to R2.
 

@@ -85,6 +85,7 @@ O corpo pode ser qualquer JSON válido: objeto, array, string, número, booleano
 - Corpo máximo: `1.900.000` bytes em UTF-8.
 - Resultado máximo de uma mutação por caminho: `1.900.000` bytes em UTF-8.
 - JSON Pointer: até `4.096` bytes UTF-8 após decodificar a URL e `64` segmentos.
+- Resultado de uma mutação por caminho: até `1.000` níveis aninhados de objetos e arrays, limite do JSON1. Um JSON mais profundo salvo por `PUT /:id` precisa ser substituído por um documento mais raso antes de aceitar atualizações por caminho.
 - Rate limit: 30 requisições por IP a cada 10 segundos.
 - Não há listagem, busca, expiração, histórico, remoção por caminho ou mutações múltiplas.
 
