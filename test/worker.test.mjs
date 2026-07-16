@@ -228,8 +228,28 @@ class MockD1 {
   }
 }
 
+class RecordingD1 extends MockD1 {
+  constructor(items = []) {
+    super(items);
+    this.bindings = [];
+  }
+
+  prepare(sql) {
+    const statement = super.prepare(sql);
+    return {
+      bind: (...args) => {
+        this.bindings.push({ sql, args });
+        return statement.bind(...args);
+      },
+    };
+  }
+}
+
 const call = (db, path, init = {}) =>
   worker.fetch(new Request(`https://kv.helio.me${path}`, init), { tasks: db });
+
+const valuePath = (id, pointer) =>
+  `/${id}/value?${new URLSearchParams({ path: pointer })}`;
 
 async function assertError(response, status, code) {
   assert.equal(response.status, status);
@@ -266,11 +286,326 @@ test("retorna 405 para métodos não suportados em rotas conhecidas", async () =
   const db = new MockD1();
   const root = await call(db, "/", { method: "POST" });
   const version = await call(db, "/item/version", { method: "PUT", body: "{}" });
+  const value = await call(db, valuePath("item", "/a"));
+  const deleteValue = await call(db, valuePath("item", "/a"), { method: "DELETE" });
 
   await assertError(root, 405, "METHOD_NOT_ALLOWED");
   assert.equal(root.headers.get("Allow"), "GET, OPTIONS");
   await assertError(version, 405, "METHOD_NOT_ALLOWED");
   assert.equal(version.headers.get("Allow"), "GET, OPTIONS");
+  await assertError(value, 405, "METHOD_NOT_ALLOWED");
+  assert.equal(value.headers.get("Allow"), "PUT, OPTIONS");
+  await assertError(deleteValue, 405, "METHOD_NOT_ALLOWED");
+  assert.equal(deleteValue.headers.get("Allow"), "PUT, OPTIONS");
+});
+
+test("PUT /:id/value cria itens e ancestrais ausentes como objetos", async () => {
+  const db = new MockD1();
+  const response = await call(
+    db,
+    valuePath("config", "/preferencias/notificacoes/email"),
+    { method: "PUT", body: "true" },
+  );
+  const created = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(created.version, 1);
+  assert.equal(created.created_at, created.updated_at);
+  assert.deepEqual(created.json, {
+    preferencias: { notificacoes: { email: true } },
+  });
+
+  const numeric = await (
+    await call(db, valuePath("numerico", "/items/0/name"), {
+      method: "PUT",
+      body: '"primeiro"',
+    })
+  ).json();
+  assert.deepEqual(numeric.json, { items: { 0: { name: "primeiro" } } });
+});
+
+test("PUT /:id/value substitui folhas, cria objetos e atualiza arrays sem lacunas", async () => {
+  const db = new MockD1();
+  const initial = await (
+    await call(db, "/preferencias", {
+      method: "PUT",
+      body: '{"perfil":{"tema":"claro"},"valores":[1],"nulo":null}',
+    })
+  ).json();
+
+  const theme = await (
+    await call(db, valuePath("preferencias", "/perfil/tema"), {
+      method: "PUT",
+      body: '"escuro"',
+    })
+  ).json();
+  assert.equal(theme.version, 2);
+  assert.equal(theme.created_at, initial.created_at);
+  assert.deepEqual(theme.json.perfil, { tema: "escuro" });
+
+  const nested = await (
+    await call(db, valuePath("preferencias", "/perfil/notificacoes/email"), {
+      method: "PUT",
+      body: "true",
+    })
+  ).json();
+  assert.deepEqual(nested.json.perfil, {
+    tema: "escuro",
+    notificacoes: { email: true },
+  });
+
+  const noOp = await (
+    await call(db, valuePath("preferencias", "/perfil/tema"), {
+      method: "PUT",
+      body: '"escuro"',
+    })
+  ).json();
+  assert.equal(noOp.version, 4);
+
+  await call(db, valuePath("preferencias", "/valores/0"), {
+    method: "PUT",
+    body: "2",
+  });
+  const appended = await (
+    await call(db, valuePath("preferencias", "/valores/1"), {
+      method: "PUT",
+      body: "3",
+    })
+  ).json();
+  assert.deepEqual(appended.json.valores, [2, 3]);
+
+  const repeated = await (
+    await call(db, valuePath("preferencias", "/valores/1"), {
+      method: "PUT",
+      body: "4",
+    })
+  ).json();
+  assert.deepEqual(repeated.json.valores, [2, 4]);
+
+  const replacedNull = await (
+    await call(db, valuePath("preferencias", "/nulo"), {
+      method: "PUT",
+      body: "{}",
+    })
+  ).json();
+  assert.deepEqual(replacedNull.json.nulo, {});
+});
+
+test("PUT /:id/value retorna conflitos de caminho com contexto acionável", async () => {
+  const db = new MockD1();
+  await call(db, "/conflitos", {
+    method: "PUT",
+    body: '{"bloqueado":null,"valores":[1]}',
+  });
+
+  const blocked = await assertError(
+    await call(db, valuePath("conflitos", "/bloqueado/filho"), {
+      method: "PUT",
+      body: "1",
+    }),
+    409,
+    "PATH_TYPE_CONFLICT",
+  );
+  assert.equal(blocked.path, "/bloqueado/filho");
+  assert.equal(blocked.blocked_at, "/bloqueado");
+  assert.equal(blocked.actual_type, "null");
+  assert.equal(blocked.required_type, "object_or_array");
+
+  for (const token of ["-", "-1", "01", "9007199254740992"]) {
+    const invalid = await assertError(
+      await call(db, valuePath("conflitos", `/valores/${token}`), {
+        method: "PUT",
+        body: "2",
+      }),
+      409,
+      "INVALID_ARRAY_INDEX",
+    );
+    assert.equal(invalid.path, `/valores/${token}`);
+    assert.equal(invalid.token, token);
+  }
+
+  const gap = await assertError(
+    await call(db, valuePath("conflitos", "/valores/2"), {
+      method: "PUT",
+      body: "2",
+    }),
+    409,
+    "ARRAY_INDEX_OUT_OF_BOUNDS",
+  );
+  assert.equal(gap.path, "/valores/2");
+  assert.equal(gap.index, 2);
+  assert.equal(gap.array_length, 1);
+  assert.equal(db.items.get("conflitos").version, 1);
+});
+
+test("PUT /:id/value valida e decodifica JSON Pointer antes de ler o corpo", async () => {
+  const db = new MockD1();
+  await assertError(
+    await call(db, "/pointer/value", { method: "PUT", body: "{" }),
+    400,
+    "MISSING_PATH_PARAMETER",
+  );
+  await assertError(
+    await call(db, "/pointer/value?path=%2Fa&path=%2Fb", {
+      method: "PUT",
+      body: "1",
+    }),
+    400,
+    "DUPLICATE_PATH_PARAMETER",
+  );
+  await assertError(
+    await call(db, "/pointer/value?path=", { method: "PUT", body: "1" }),
+    400,
+    "ROOT_PATH_NOT_ALLOWED",
+  );
+  await assertError(
+    await call(db, "/pointer/value?path=sem-barra", { method: "PUT", body: "1" }),
+    400,
+    "INVALID_JSON_POINTER",
+  );
+  await assertError(
+    await call(db, valuePath("pointer", "/a~2b"), { method: "PUT", body: "1" }),
+    400,
+    "INVALID_JSON_POINTER",
+  );
+
+  const longPointer = `/${"a".repeat(4096)}`;
+  await assertError(
+    await call(db, valuePath("pointer", longPointer), { method: "PUT", body: "1" }),
+    414,
+    "PATH_TOO_LONG",
+  );
+  const deepPointer = `/${Array(65).fill("a").join("/")}`;
+  await assertError(
+    await call(db, valuePath("pointer", deepPointer), { method: "PUT", body: "1" }),
+    400,
+    "PATH_TOO_DEEP",
+  );
+});
+
+test("PUT /:id/value preserva chaves especiais após URL e JSON Pointer", async () => {
+  const db = new MockD1();
+  const emptyKey = await (
+    await call(db, valuePath("especiais", "/"), { method: "PUT", body: "1" })
+  ).json();
+  assert.deepEqual(emptyKey.json, { "": 1 });
+
+  const tokens = ["a/b", "m~n", "é", "a.b", "a[b]", 'a"b', "a\\b", "#", "%", "+"];
+  const pointer = tokens
+    .map((token) => `/${token.replaceAll("~", "~0").replaceAll("/", "~1")}`)
+    .join("");
+  const special = await (
+    await call(db, valuePath("especiais", pointer), { method: "PUT", body: "true" })
+  ).json();
+
+  let nested = special.json;
+  for (const token of tokens) nested = nested[token];
+  assert.equal(nested, true);
+});
+
+test("PUT /:id/value distingue corpo inválido e rejeita estados armazenados ambíguos", async () => {
+  const db = new MockD1([
+    {
+      id: "invalido_armazenado",
+      version: 1,
+      json: "{",
+      created_at: null,
+      updated_at: null,
+    },
+    {
+      id: "duplicado_armazenado",
+      version: 1,
+      json: '{"a":1,"a":2}',
+      created_at: null,
+      updated_at: null,
+      has_duplicate_keys: 1,
+    },
+  ]);
+
+  await assertError(
+    await call(db, valuePath("json_invalido", "/a"), { method: "PUT", body: "{" }),
+    400,
+    "INVALID_JSON",
+  );
+  await assertError(
+    await call(db, valuePath("utf8_invalido", "/a"), {
+      method: "PUT",
+      body: new Uint8Array([0x22, 0xff, 0x22]),
+    }),
+    400,
+    "INVALID_UTF8",
+  );
+  await assertError(
+    await call(db, valuePath("invalido_armazenado", "/a"), {
+      method: "PUT",
+      body: "1",
+    }),
+    409,
+    "STORED_JSON_INVALID",
+  );
+  await assertError(
+    await call(db, valuePath("duplicado_armazenado", "/a"), {
+      method: "PUT",
+      body: "1",
+    }),
+    409,
+    "AMBIGUOUS_PATH",
+  );
+});
+
+test("PUT /:id/value aplica limites distintos ao corpo e ao resultado", async () => {
+  const db = new MockD1();
+  const bodyAtLimit = JSON.stringify("a".repeat(MAX_JSON_BYTES - 2));
+  const result = await assertError(
+    await call(db, valuePath("resultado_grande", "/valor"), {
+      method: "PUT",
+      body: bodyAtLimit,
+    }),
+    422,
+    "RESULT_TOO_LARGE",
+  );
+  assert.ok(result.result_bytes > MAX_JSON_BYTES);
+  assert.equal(result.max_bytes, MAX_JSON_BYTES);
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(MAX_JSON_BYTES));
+      controller.enqueue(new Uint8Array([0x20]));
+      controller.close();
+    },
+  });
+  await assertError(
+    await call(db, valuePath("corpo_grande", "/valor"), {
+      method: "PUT",
+      body: stream,
+      duplex: "half",
+    }),
+    413,
+    "PAYLOAD_TOO_LARGE",
+  );
+});
+
+test("PUT /:id/value preserva created_at nulo de registros legados", async () => {
+  const db = new MockD1([
+    {
+      id: "legado_path",
+      version: 7,
+      json: "{}",
+      created_at: null,
+      updated_at: null,
+    },
+  ]);
+
+  const response = await call(db, valuePath("legado_path", "/ativo"), {
+    method: "PUT",
+    body: "true",
+  });
+  const updated = await response.json();
+  assert.equal(updated.version, 8);
+  assert.equal(updated.created_at, null);
+  assert.ok(updated.updated_at);
+  assert.deepEqual(updated.json, { ativo: true });
 });
 
 test("cria, consulta, atualiza, versiona e exclui um item", async () => {
@@ -383,6 +718,26 @@ test("preserva números JSON maiores que a precisão do JavaScript", async () =>
     assert.equal(response.status, 200);
     assert.equal(db.items.get(id).json, value);
     assert.match(await response.text(), new RegExp(`"json":${value}}`));
+  }
+});
+
+test("PUT /:id/value vincula literais numéricos extremos sem reserializar", async () => {
+  for (const [id, value] of [
+    ["inteiro_path", "9007199254740993"],
+    ["expoente_path", "1e400"],
+  ]) {
+    const db = new RecordingD1();
+    const response = await call(db, valuePath(id, "/valor"), {
+      method: "PUT",
+      body: value,
+    });
+    assert.equal(response.status, 200);
+
+    const jsonStatements = db.bindings.filter(({ sql }) => sql.includes("json(?)"));
+    assert.ok(jsonStatements.length >= 2);
+    for (const statement of jsonStatements) {
+      assert.ok(statement.args.includes(value));
+    }
   }
 });
 

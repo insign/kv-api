@@ -1,5 +1,10 @@
 import { DOCS_HTML } from "./docs.js";
-import { JsonPathError, planJsonSetPath, sqliteObjectSegment } from "./json-path.js";
+import {
+  JsonPathError,
+  parseJsonPointer,
+  planJsonSetPath,
+  sqliteObjectSegment,
+} from "./json-path.js";
 
 const MAX_JSON_BYTES = 1_900_000;
 const VALID_ID = /^[A-Za-z0-9_-]{1,100}$/;
@@ -511,6 +516,55 @@ export default {
           },
         ),
       );
+
+    if (parts.length === 2 && parts[1] === "value") {
+      const id = parts[0];
+      if (!VALID_ID.test(id)) return invalidId(id);
+      if (method !== "PUT") {
+        return methodNotAllowed("PUT, OPTIONS");
+      }
+
+      let pointer;
+      let tokens;
+      try {
+        ({ pointer, tokens } = parseJsonPointer(url.searchParams));
+      } catch (error) {
+        if (error instanceof JsonPathError) {
+          return errorJson(new ApiError(error.code, error.message, error.hint, error.details));
+        }
+        throw error;
+      }
+
+      let replacementJson;
+      try {
+        replacementJson = await readJsonRequestBody(request);
+      } catch (error) {
+        if (error instanceof ApiError) return errorJson(error);
+        throw error;
+      }
+
+      try {
+        const updated = await setJsonValue(env.tasks, id, tokens, replacementJson);
+        return itemJson(updated);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          const pathDetails = [
+            "PATH_TYPE_CONFLICT",
+            "INVALID_ARRAY_INDEX",
+            "ARRAY_INDEX_OUT_OF_BOUNDS",
+          ].includes(error.code)
+            ? { path: pointer }
+            : {};
+          return errorJson(
+            new ApiError(error.code, error.message, error.hint, {
+              ...pathDetails,
+              ...error.details,
+            }, error.retryable),
+          );
+        }
+        throw error;
+      }
+    }
 
     if (parts.length === 2 && parts[1] === "version") {
       const id = parts[0];
