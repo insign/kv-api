@@ -47,6 +47,15 @@ test("parseJsonPointer rejects missing, duplicate, root, and malformed paths", (
   expectCode("INVALID_JSON_POINTER", () => parse("path=perfil"));
   expectCode("INVALID_JSON_POINTER", () => parse("path=%2Fa~"));
   expectCode("INVALID_JSON_POINTER", () => parse("path=%2Fa~2b"));
+
+  assert.throws(
+    () => parse(`path=${"x".repeat(10_000)}`),
+    (error) => {
+      assert.equal(error.code, "INVALID_JSON_POINTER");
+      assert.equal(error.details.path.length, 512);
+      return true;
+    },
+  );
 });
 
 test("parseJsonPointer enforces decoded UTF-8 byte and segment limits", () => {

@@ -74,7 +74,7 @@ export function parseJsonPointer(searchParams) {
       "INVALID_JSON_POINTER",
       "O parâmetro path não é um JSON Pointer válido.",
       "Inicie o caminho com / e escape ~ como ~0 e / como ~1 dentro de cada segmento.",
-      { path: pointer, reason: "missing_leading_slash" },
+      { path: pointer.slice(0, 512), reason: "missing_leading_slash" },
     );
   }
 
