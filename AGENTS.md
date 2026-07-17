@@ -16,6 +16,13 @@ The API intentionally has no authentication. Anyone who knows an ID can read, ov
 
 The production route is declared in `wrangler.jsonc`, which is the source of truth. Route changes must be deployed through Wrangler and verified against both the new and removed hostnames.
 
+Production response headers also depend on zone-level Cloudflare configuration that is not represented in `wrangler.jsonc`:
+
+- The `helio.me` Managed Transform `add_security_headers` is enabled zone-wide and sets `Referrer-Policy: same-origin` after the Worker response.
+- Response Header Transform Ruleset `c61f38b827a54bdcb6014f1d77b3557f`, rule `7e9a8f96222f402da32ef6a3c387859c`, matches `(http.host eq "kv.helio.me")` and sets `Referrer-Policy: no-referrer` after the managed transform.
+- Keep this hostname-scoped override enabled while mutating GET aliases exist. Do not disable the zone-wide security-header transform just for this Worker because that would affect every `helio.me` hostname.
+- If the override must be rolled back, delete only its rule and expect production to return the managed `same-origin` value again. Verify the public header after any Managed Transform or Response Header Transform change.
+
 ## Project Layout
 
 - `src/worker.js`: complete Worker request handler and API implementation.
