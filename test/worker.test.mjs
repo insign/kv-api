@@ -5,6 +5,8 @@ import worker, { ApiError, setJsonValue } from "../src/worker.js";
 
 const MAX_JSON_BYTES = 1_900_000;
 const MAX_D1_VALUE_BYTES = 2_000_000;
+const MAX_GET_DATA_BYTES = 10_000;
+const MAX_GET_URI_BYTES = 15_000;
 
 function sqlitePathSegments(path) {
   const segments = [];
@@ -70,6 +72,7 @@ function applyJsonSet(rawJson, path, replacementJson) {
 
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
 const nestedArray = (depth) => "[".repeat(depth) + "0" + "]".repeat(depth);
+const encodeData = (jsonText) => Buffer.from(jsonText, "utf8").toString("base64url");
 
 function materializeJsonSet(rawJson, path, replacementJson) {
   const result = applyJsonSet(rawJson, path, replacementJson);
@@ -251,10 +254,19 @@ const call = (db, path, init = {}) =>
 
 const valuePath = (id, pointer) =>
   `/${id}/value?${new URLSearchParams({ path: pointer })}`;
+const putAliasPath = (id, jsonText) =>
+  `/${id}?${new URLSearchParams({ method: "PUT", data: encodeData(jsonText) })}`;
+const valueAliasPath = (id, pointer, jsonText) =>
+  `/${id}/value?${new URLSearchParams({
+    method: "PUT",
+    path: pointer,
+    data: encodeData(jsonText),
+  })}`;
 
 async function assertError(response, status, code) {
   assert.equal(response.status, status);
   assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
   const body = await response.json();
   assert.equal(body.code, code);
   assert.equal(typeof body.error, "string");
@@ -270,6 +282,7 @@ test("serve documentação completa na raiz", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("Content-Type"), /^text\/html/);
   assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), "*");
   assert.equal(
     response.headers.get("Content-Security-Policy"),
@@ -328,6 +341,108 @@ test("retorna 405 para métodos não suportados em rotas conhecidas", async () =
   assert.equal(value.headers.get("Allow"), "PUT, OPTIONS");
   await assertError(deleteValue, 405, "METHOD_NOT_ALLOWED");
   assert.equal(deleteValue.headers.get("Allow"), "PUT, OPTIONS");
+});
+
+test("GET explícito lê itens e queries alheias não ativam aliases", async () => {
+  const db = new MockD1();
+  const created = await (
+    await call(db, "/leitura", { method: "PUT", body: '{"valor":1}' })
+  ).json();
+
+  for (const path of [
+    "/leitura",
+    "/leitura?method=GET",
+    "/leitura?qualquer=valor",
+    `/leitura?Method=PUT&data=${encodeData("false")}`,
+  ]) {
+    const response = await call(db, path);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
+    assert.deepEqual(await response.json(), created);
+  }
+  assert.equal(db.items.get("leitura").version, 1);
+});
+
+test("aliases GET de substituição e exclusão compartilham versionamento e timestamps", async () => {
+  const db = new MockD1();
+  const aliasUrl = putAliasPath("alias_crud", '{"nome":"Ana"}');
+
+  const created = await (await call(db, aliasUrl)).json();
+  assert.equal(created.version, 1);
+  assert.equal(created.created_at, created.updated_at);
+  assert.deepEqual(created.json, { nome: "Ana" });
+
+  const repeated = await (await call(db, aliasUrl)).json();
+  assert.equal(repeated.version, 2);
+  assert.equal(repeated.created_at, created.created_at);
+  assert.deepEqual(repeated.json, created.json);
+
+  const canonical = await (
+    await call(db, "/alias_crud", { method: "PUT", body: '[1,"dois"]' })
+  ).json();
+  assert.equal(canonical.version, 3);
+  assert.equal(canonical.created_at, created.created_at);
+  assert.deepEqual(canonical.json, [1, "dois"]);
+
+  const deleted = await (await call(db, "/alias_crud?method=DELETE")).json();
+  assert.deepEqual(deleted, { ok: true, id: "alias_crud" });
+  await assertError(
+    await call(db, "/alias_crud?method=DELETE"),
+    404,
+    "ITEM_NOT_FOUND",
+  );
+});
+
+test("alias GET de substituição aceita todos os tipos JSON e preserva texto bruto", async () => {
+  const values = [
+    ["objeto_alias", '{"nome":"Ana"}'],
+    ["array_alias", '[1,"dois"]'],
+    ["string_alias", '"ação"'],
+    ["numero_alias", "42.5"],
+    ["booleano_alias", "true"],
+    ["nulo_alias", "null"],
+    ["inteiro_alias", "9007199254740993"],
+    ["expoente_alias", "1e400"],
+  ];
+
+  for (const [id, jsonText] of values) {
+    const db = new RecordingD1();
+    const response = await call(db, putAliasPath(id, jsonText));
+    assert.equal(response.status, 200);
+    assert.equal(db.items.get(id).json, jsonText);
+    const insert = db.bindings.find(({ sql }) => sql.startsWith("INSERT INTO items"));
+    assert.ok(insert);
+    assert.equal(insert.args[1], jsonText);
+  }
+});
+
+test("aliases só são interpretados em GET real e nunca alteram a rota de versão", async () => {
+  const db = new MockD1();
+  const put = await (
+    await call(db, "/metodo_real?method=DELETE", { method: "PUT", body: '{"ativo":true}' })
+  ).json();
+  assert.equal(put.version, 1);
+  assert.deepEqual(put.json, { ativo: true });
+
+  const version = await (
+    await call(db, "/metodo_real/version?method=DELETE&data=ignorado")
+  ).json();
+  assert.deepEqual(version, { id: "metodo_real", version: 1 });
+
+  const deleted = await (
+    await call(db, `/metodo_real?method=PUT&data=${encodeData("false")}`, {
+      method: "DELETE",
+    })
+  ).json();
+  assert.deepEqual(deleted, { ok: true, id: "metodo_real" });
+
+  const canonicalPath = await call(
+    db,
+    `/metodo_path/value?method=DELETE&data=ignorado&path=%2Fa`,
+    { method: "PUT", body: "1" },
+  );
+  assert.equal(canonicalPath.status, 200);
+  assert.deepEqual((await canonicalPath.json()).json, { a: 1 });
 });
 
 test("PUT /:id/value cria itens e ancestrais ausentes como objetos", async () => {
@@ -470,6 +585,99 @@ test("PUT /:id/value retorna conflitos de caminho com contexto acionável", asyn
   assert.equal(db.items.get("conflitos").version, 1);
 });
 
+test("alias GET por caminho cria ancestrais, atualiza arrays e repete no-op", async () => {
+  const db = new MockD1();
+  const created = await (
+    await call(
+      db,
+      valueAliasPath("alias_path", "/preferencias/notificacoes/email", "true"),
+    )
+  ).json();
+  assert.equal(created.version, 1);
+  assert.equal(created.created_at, created.updated_at);
+  assert.deepEqual(created.json, {
+    preferencias: { notificacoes: { email: true } },
+  });
+
+  await call(db, "/alias_path", {
+    method: "PUT",
+    body: '{"perfil":{"tema":"claro"},"valores":[1],"nulo":null}',
+  });
+  const themeUrl = valueAliasPath("alias_path", "/perfil/tema", '"escuro"');
+  const theme = await (await call(db, themeUrl)).json();
+  assert.equal(theme.version, 3);
+  assert.equal(theme.json.perfil.tema, "escuro");
+
+  const noOp = await (await call(db, themeUrl)).json();
+  assert.equal(noOp.version, 4);
+  assert.equal(noOp.json.perfil.tema, "escuro");
+
+  const nested = await (
+    await call(db, valueAliasPath("alias_path", "/perfil/opcoes/idioma", '"pt-BR"'))
+  ).json();
+  assert.deepEqual(nested.json.perfil.opcoes, { idioma: "pt-BR" });
+
+  const replaced = await (
+    await call(db, valueAliasPath("alias_path", "/valores/0", "2"))
+  ).json();
+  assert.deepEqual(replaced.json.valores, [2]);
+  const appended = await (
+    await call(db, valueAliasPath("alias_path", "/valores/1", "3"))
+  ).json();
+  assert.deepEqual(appended.json.valores, [2, 3]);
+
+  const replacedNull = await (
+    await call(db, valueAliasPath("alias_path", "/nulo", "{}"))
+  ).json();
+  assert.deepEqual(replacedNull.json.nulo, {});
+});
+
+test("alias GET por caminho reutiliza conflitos canônicos e preserva bindings extremos", async () => {
+  const db = new RecordingD1();
+  await call(db, "/alias_conflitos", {
+    method: "PUT",
+    body: '{"bloqueado":null,"valores":[1],"grande":9007199254740993}',
+  });
+
+  const blocked = await assertError(
+    await call(
+      db,
+      valueAliasPath("alias_conflitos", "/bloqueado/filho", "1"),
+    ),
+    409,
+    "PATH_TYPE_CONFLICT",
+  );
+  assert.equal(blocked.path, "/bloqueado/filho");
+  assert.equal(blocked.blocked_at, "/bloqueado");
+
+  const invalid = await assertError(
+    await call(db, valueAliasPath("alias_conflitos", "/valores/01", "2")),
+    409,
+    "INVALID_ARRAY_INDEX",
+  );
+  assert.equal(invalid.path, "/valores/01");
+
+  const gap = await assertError(
+    await call(db, valueAliasPath("alias_conflitos", "/valores/2", "2")),
+    409,
+    "ARRAY_INDEX_OUT_OF_BOUNDS",
+  );
+  assert.equal(gap.path, "/valores/2");
+  assert.equal(db.items.get("alias_conflitos").version, 1);
+
+  for (const [pointer, value] of [
+    ["/inteiro", "9007199254740993"],
+    ["/expoente", "1e400"],
+  ]) {
+    const response = await call(db, valueAliasPath("alias_conflitos", pointer, value));
+    assert.equal(response.status, 200);
+    const latestJsonStatement = db.bindings
+      .filter(({ sql }) => sql.includes("json(?)"))
+      .at(-1);
+    assert.ok(latestJsonStatement.args.includes(value));
+  }
+});
+
 test("PUT /:id/value valida e decodifica JSON Pointer antes de ler o corpo", async () => {
   const db = new MockD1();
   await assertError(
@@ -583,6 +791,191 @@ test("PUT /:id/value distingue corpo inválido e rejeita estados armazenados amb
     409,
     "AMBIGUOUS_PATH",
   );
+});
+
+test("aliases GET validam método, nomes e cardinalidade em ordem determinística", async () => {
+  const db = new MockD1();
+  const encodedOne = encodeData("1");
+
+  const duplicateMethod = await assertError(
+    await call(db, `/query?method=PUT&method=DELETE&data=${encodedOne}`),
+    400,
+    "DUPLICATE_METHOD_PARAMETER",
+  );
+  assert.equal(duplicateMethod.method_count, 2);
+
+  for (const method of ["put", "delete", "", "PATCH"]) {
+    const invalid = await assertError(
+      await call(db, `/query?method=${encodeURIComponent(method)}`),
+      400,
+      "INVALID_METHOD_PARAMETER",
+    );
+    assert.deepEqual(invalid.accepted_methods, ["GET", "PUT", "DELETE"]);
+  }
+
+  const unexpected = await assertError(
+    await call(db, `/query?method=PUT&data=${encodedOne}&z=1&a=2&z=3`),
+    400,
+    "UNEXPECTED_QUERY_PARAMETER",
+  );
+  assert.deepEqual(unexpected.parameters, ["a", "z"]);
+  await assertError(
+    await call(db, "/query?method=GET&extra=1"),
+    400,
+    "UNEXPECTED_QUERY_PARAMETER",
+  );
+  await assertError(
+    await call(db, `/query?method=DELETE&data=${encodedOne}`),
+    400,
+    "UNEXPECTED_QUERY_PARAMETER",
+  );
+
+  await assertError(
+    await call(db, "/query?method=PUT"),
+    400,
+    "MISSING_DATA_PARAMETER",
+  );
+  const duplicateData = await assertError(
+    await call(db, `/query?method=PUT&data=${encodedOne}&data=${encodedOne}`),
+    400,
+    "DUPLICATE_DATA_PARAMETER",
+  );
+  assert.equal(duplicateData.data_count, 2);
+
+  const valueWithoutMethod = await call(db, valuePath("query", "/a"));
+  await assertError(valueWithoutMethod, 405, "METHOD_NOT_ALLOWED");
+  assert.equal(valueWithoutMethod.headers.get("Allow"), "PUT, OPTIONS");
+
+  const invalidValueMethod = await assertError(
+    await call(db, `/query/value?method=GET&path=%2Fa&data=${encodedOne}`),
+    400,
+    "INVALID_METHOD_PARAMETER",
+  );
+  assert.deepEqual(invalidValueMethod.accepted_methods, ["PUT"]);
+
+  await assertError(
+    await call(db, `/query/value?method=PUT&data=${encodedOne}`),
+    400,
+    "MISSING_PATH_PARAMETER",
+  );
+  await assertError(
+    await call(db, "/query/value?method=PUT&path=%2Fa"),
+    400,
+    "MISSING_DATA_PARAMETER",
+  );
+  await assertError(
+    await call(db, `/query/value?method=PUT&path=&data=A`),
+    400,
+    "ROOT_PATH_NOT_ALLOWED",
+  );
+});
+
+test("aliases GET exigem base64url canônico, UTF-8 válido e JSON válido sem eco", async () => {
+  const db = new MockD1();
+  const invalidEncodings = [
+    ["%2Bw", "invalid_alphabet_or_padding"],
+    ["Lw%3D%3D", "invalid_alphabet_or_padding"],
+    ["MQ%20", "invalid_alphabet_or_padding"],
+    ["A", "invalid_length"],
+    ["Zh", "non_canonical"],
+  ];
+
+  for (const [data, reason] of invalidEncodings) {
+    const problem = await assertError(
+      await call(db, `/encoding?method=PUT&data=${data}`),
+      400,
+      "INVALID_DATA_ENCODING",
+    );
+    assert.equal(problem.reason, reason);
+  }
+
+  const invalidUtf8 = Buffer.from([0x22, 0xff, 0x22]).toString("base64url");
+  await assertError(
+    await call(db, `/encoding?method=PUT&data=${invalidUtf8}`),
+    400,
+    "INVALID_UTF8",
+  );
+  await assertError(
+    await call(db, `/encoding?method=PUT&data=${encodeData("{")}`),
+    400,
+    "INVALID_JSON",
+  );
+  await assertError(
+    await call(db, "/encoding?method=PUT&data="),
+    400,
+    "INVALID_JSON",
+  );
+
+  const decodedSecret = "segredo-nao-ecoado";
+  const encodedSecret = encodeData(decodedSecret);
+  const response = await call(db, `/encoding?method=PUT&data=${encodedSecret}`);
+  assert.equal(response.status, 400);
+  const body = await response.text();
+  assert.doesNotMatch(body, new RegExp(decodedSecret));
+  assert.doesNotMatch(body, new RegExp(encodedSecret));
+  assert.equal(db.items.has("encoding"), false);
+});
+
+test("aliases GET aplicam limites inclusivos de data e URL antes da mutação", async () => {
+  const db = new MockD1();
+  const atDataLimit = JSON.stringify("a".repeat(MAX_GET_DATA_BYTES - 2));
+  const aboveDataLimit = JSON.stringify("a".repeat(MAX_GET_DATA_BYTES - 1));
+  assert.equal(utf8Bytes(atDataLimit), MAX_GET_DATA_BYTES);
+  assert.equal(utf8Bytes(aboveDataLimit), MAX_GET_DATA_BYTES + 1);
+
+  const accepted = await call(db, putAliasPath("data_limite", atDataLimit));
+  assert.equal(accepted.status, 200);
+  assert.equal(db.items.get("data_limite").json, atDataLimit);
+
+  const tooLarge = await assertError(
+    await call(db, putAliasPath("data_excesso", aboveDataLimit)),
+    413,
+    "QUERY_DATA_TOO_LARGE",
+  );
+  assert.equal(tooLarge.max_bytes, MAX_GET_DATA_BYTES);
+  assert.equal(db.items.has("data_excesso"), false);
+
+  const encoded = encodeData(atDataLimit);
+  const pathFor = (fillerLength) =>
+    `/uri_limite/value?${new URLSearchParams({
+      method: "PUT",
+      path: `/${"p".repeat(fillerLength)}`,
+      data: encoded,
+    })}`;
+  const emptyAbsolute = `https://kv.helio.me${pathFor(0)}`;
+  const fillerLength = MAX_GET_URI_BYTES - utf8Bytes(emptyAbsolute);
+  const atUriLimit = pathFor(fillerLength);
+  assert.equal(utf8Bytes(`https://kv.helio.me${atUriLimit}`), MAX_GET_URI_BYTES);
+
+  const uriAccepted = await call(db, atUriLimit);
+  assert.equal(uriAccepted.status, 200);
+  assert.equal(db.items.get("uri_limite").version, 1);
+
+  const aboveUriLimit = pathFor(fillerLength + 1);
+  assert.equal(
+    utf8Bytes(`https://kv.helio.me${aboveUriLimit}`),
+    MAX_GET_URI_BYTES + 1,
+  );
+  const uriTooLong = await assertError(
+    await call(db, aboveUriLimit),
+    414,
+    "URI_TOO_LONG",
+  );
+  assert.equal(uriTooLong.uri_bytes, MAX_GET_URI_BYTES + 1);
+  assert.equal(uriTooLong.max_uri_bytes, MAX_GET_URI_BYTES);
+  assert.equal(db.items.get("uri_limite").version, 1);
+});
+
+test("limite de URI precede parâmetros, caminho e data inválidos", async () => {
+  const db = new MockD1();
+  const oversized = "x".repeat(MAX_GET_URI_BYTES);
+  const response = await call(
+    db,
+    `/precedencia/value?method=PUT&extra=${oversized}&data=A`,
+  );
+  const problem = await assertError(response, 414, "URI_TOO_LONG");
+  assert.ok(problem.uri_bytes > MAX_GET_URI_BYTES);
+  assert.equal(db.items.has("precedencia"), false);
 });
 
 test("PUT /:id/value aplica limites distintos ao corpo e ao resultado", async () => {
@@ -1219,6 +1612,7 @@ test("mantém preflight e informa métodos aceitos", async () => {
   assert.equal(options.status, 204);
   assert.equal(options.headers.get("Access-Control-Max-Age"), "86400");
   assert.equal(options.headers.get("Cache-Control"), null);
+  assert.equal(options.headers.get("Referrer-Policy"), "no-referrer");
 
   const patch = await call(db, "/item", { method: "PATCH" });
   await assertError(patch, 405, "METHOD_NOT_ALLOWED");
