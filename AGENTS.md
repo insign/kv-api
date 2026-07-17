@@ -57,6 +57,10 @@ Supported routes:
 | --- | --- | --- |
 | `GET` | `/` | Returns the complete HTML API documentation. |
 | `GET` | `/:id` | Returns the item, version, timestamps, and JSON value. |
+| `GET` | `/:id?method=GET` | Explicit read alias; accepts no other query parameter. |
+| `GET` | `/:id?method=PUT&data=<base64url JSON>` | Creates or fully replaces through a restricted-client compatibility alias. |
+| `GET` | `/:id/value?method=PUT&path=<JSON Pointer>&data=<base64url JSON>` | Creates or replaces one value through a compatibility alias. |
+| `GET` | `/:id?method=DELETE` | Deletes through a compatibility alias. |
 | `GET` | `/:id/version` | Returns only `{ id, version }`. |
 | `PUT` | `/:id` | Creates or fully replaces the JSON value. |
 | `PUT` | `/:id/value?path=<JSON Pointer>` | Creates or replaces one value addressed by RFC 6901 JSON Pointer. |
@@ -91,12 +95,43 @@ Rules and invariants:
 - `GET /:id/version` intentionally does not return timestamps.
 - Responses containing API JSON use `Cache-Control: no-store`.
 - The documentation home also uses `Cache-Control: no-store` so deploys are visible immediately.
+- All responses use `Referrer-Policy: no-referrer`; this is only a partial mitigation for URL exposure.
 - CORS intentionally permits all origins.
 - Unsupported methods return `405` with an `Allow` header.
 
 For full replacements, the Worker validates JSON syntax but stores and embeds the original JSON text instead of parsing and reserializing it. This preserves valid numeric literals outside JavaScript's safe integer range, such as `9007199254740993` and `1e400`.
 
 Set-by-path mutations necessarily pass through SQLite JSON1 and may normalize insignificant whitespace. The replacement body is bound to `json(?)` as its original validated text, and untouched extreme numeric literals must remain lexically unchanged.
+
+## GET Compatibility Aliases
+
+Mutating GET aliases exist only for clients that cannot select an HTTP method. Canonical `PUT` and `DELETE` remain the recommended interface. The aliases share the canonical persistence functions, so SQL semantics, version increments, timestamps, JSON text preservation, JSON Pointer behavior, optimistic concurrency, response envelopes, status codes, and existing errors must stay equivalent.
+
+The alias grammar is strict:
+
+- Only a real HTTP `GET` can activate an alias. Query parameters never reinterpret a real `PUT` or `DELETE`.
+- Parameter names and values are case-sensitive. Accepted method values are uppercase `GET`, `PUT`, and `DELETE` only where documented.
+- `GET /:id?method=GET` requires exactly one `method` and no other query parameter.
+- `GET /:id?method=PUT&data=...` requires exactly one `method` and one `data`, with no other query parameter.
+- `GET /:id?method=DELETE` requires exactly one `method` and no other query parameter.
+- `GET /:id/value?method=PUT&path=...&data=...` requires exactly one each of `method`, `path`, and `data`, with no other query parameter. No other method alias is valid on `/value`.
+- A plain `GET /:id` without the exact parameter name `method` remains the legacy read and continues to ignore unrelated query parameters.
+- `GET /:id/version` is always read-only, even if mutation-like query parameters are supplied.
+- `GET /:id/value` without `method=PUT` remains unsupported and returns `405`.
+- Validate in deterministic order: route, ID, and real-method support; `method` cardinality/value; mutating-alias URI size; unexpected query names. On `/:id/value`, validate the JSON Pointer before reading `data` so existing path-error precedence is preserved. Then validate `data` cardinality, base64url alphabet/padding and length remainder, encoded character bound, decodability, decoded byte bound, canonical trailing bits, UTF-8, JSON syntax, and storage rules.
+
+`data` is one complete JSON value encoded as UTF-8 and then canonical unpadded base64url. Reject padding, whitespace, `+`, `/`, non-alphabet characters, impossible length remainder 1, non-canonical trailing bits, malformed UTF-8, and invalid JSON. Bind the original validated decoded JSON text to SQL; do not parse and reserialize it in JavaScript.
+
+Alias limits and security invariants:
+
+- Decoded `data` is limited to exactly `10,000` UTF-8 bytes.
+- Encoded `data` is preflight-limited to `13,334` characters.
+- The absolute URL of a mutating alias is limited to exactly `15,000` UTF-8 bytes. Scheme, host, path, query names, separators, percent-encoded JSON Pointer, and `data` all consume this budget.
+- Cloudflare's platform URL limit is 16 KB, so a request beyond that can be rejected before reaching the Worker. Canonical request bodies retain their `1,900,000`-byte limit.
+- Every accepted alias mutation executes again when its URL is repeated and advances `version`, even if the value is unchanged. `version`, not `updated_at`, is the monotonic indicator.
+- Base64url is not encryption. URLs can remain in history, logs, analytics, proxies, referers, previews, and inspection systems. Never put secrets or sensitive data in alias URLs and never render mutating aliases as clickable links.
+- Prefetchers, crawlers, previews, retries, caches, and tooling can trigger GET side effects. `Cache-Control: no-store` and `Referrer-Policy: no-referrer` do not eliminate these risks.
+- Alias errors may expose safe metadata such as counts, accepted methods, parameter names, size limits, and encoding reason, but never `data`, decoded bytes, submitted JSON, or stored JSON.
 
 ## Set by JSON Pointer
 
@@ -118,11 +153,11 @@ Set-by-path mutations necessarily pass through SQLite JSON1 and may normalize in
 - Duplicate object keys make path selection ambiguous and are rejected until the client normalizes the document with `PUT /:id`.
 - JSON Patch, JSON Merge Patch, multiple mutations, and `If-Match` preconditions are out of scope.
 
-Structured API errors always include `error`, `code`, `retryable`, and `hint`. Context fields are code-specific and limited to actionable metadata; never include stored JSON in an error. Stable codes are `INVALID_ID`, `INVALID_ROUTE`, `ITEM_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `INVALID_JSON`, `INVALID_UTF8`, `PAYLOAD_TOO_LARGE`, `MISSING_PATH_PARAMETER`, `DUPLICATE_PATH_PARAMETER`, `INVALID_JSON_POINTER`, `ROOT_PATH_NOT_ALLOWED`, `PATH_TOO_LONG`, `PATH_TOO_DEEP`, `PATH_TYPE_CONFLICT`, `INVALID_ARRAY_INDEX`, `ARRAY_INDEX_OUT_OF_BOUNDS`, `AMBIGUOUS_PATH`, `STORED_JSON_INVALID`, `STORED_JSON_TOO_DEEP`, `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RESULT_TOO_DEEP`, and `STORE_FAILED`. Only `WRITE_CONFLICT` is currently marked `retryable: true`.
+Structured API errors always include `error`, `code`, `retryable`, and `hint`. Context fields are code-specific and limited to actionable metadata; never include stored JSON, alias `data`, decoded bytes, or submitted JSON in an error. Stable codes are `INVALID_ID`, `INVALID_ROUTE`, `ITEM_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `INVALID_JSON`, `INVALID_UTF8`, `PAYLOAD_TOO_LARGE`, `DUPLICATE_METHOD_PARAMETER`, `INVALID_METHOD_PARAMETER`, `UNEXPECTED_QUERY_PARAMETER`, `MISSING_DATA_PARAMETER`, `DUPLICATE_DATA_PARAMETER`, `INVALID_DATA_ENCODING`, `QUERY_DATA_TOO_LARGE`, `URI_TOO_LONG`, `MISSING_PATH_PARAMETER`, `DUPLICATE_PATH_PARAMETER`, `INVALID_JSON_POINTER`, `ROOT_PATH_NOT_ALLOWED`, `PATH_TOO_LONG`, `PATH_TOO_DEEP`, `PATH_TYPE_CONFLICT`, `INVALID_ARRAY_INDEX`, `ARRAY_INDEX_OUT_OF_BOUNDS`, `AMBIGUOUS_PATH`, `STORED_JSON_INVALID`, `STORED_JSON_TOO_DEEP`, `WRITE_CONFLICT`, `RESULT_TOO_LARGE`, `RESULT_TOO_DEEP`, and `STORE_FAILED`. Only `WRITE_CONFLICT` is currently marked `retryable: true`.
 
 ## Payload Limit
 
-The application limit is exactly `1,900,000` request-body bytes, measured from the UTF-8 stream. Requests over the limit return `413` and the Worker cancels further stream consumption.
+The canonical request-body limit is exactly `1,900,000` bytes, measured from the UTF-8 stream. Requests over the limit return `413` and the Worker cancels further stream consumption. GET alias `data` has the separate decoded, encoded, and URI limits documented above.
 
 The complete JSON result of `PUT /:id/value` has the same `1,900,000`-byte limit and may contain at most `1,000` nested object/array levels. An oversized result returns `422 RESULT_TOO_LARGE`, an over-deep result returns `422 RESULT_TOO_DEEP`, and an oversized request body remains `413 PAYLOAD_TOO_LARGE`.
 
@@ -131,6 +166,7 @@ Do not raise this to 2 MiB or 2,000,000 bytes without changing the storage desig
 ## Concurrency
 
 - Full-replacement `PUT /:id` uses a single `INSERT ... ON CONFLICT ... RETURNING` statement.
+- Full-replacement GET aliases call the same replacement operation and SQL statement; deletion aliases likewise call the same `DELETE ... RETURNING` operation as canonical DELETE.
 - `version = items.version + 1` is performed atomically by SQLite.
 - Set-by-path updates use optimistic compare-and-swap against `id`, `version`, and the original raw `json` text, with at most three attempts.
 - D1 `batch()` transactionally couples candidate-size validation and the conditional `UPDATE ... RETURNING`; the write predicate repeats the size check.
@@ -182,15 +218,16 @@ After deployment:
 2. Create a unique temporary ID with `PUT` and verify version `1` with equal timestamps.
 3. Update it and verify version increment, stable `created_at`, and changed `updated_at`.
 4. Use `PUT /:id/value` on an object leaf and an array, then verify the complete response, version increments, stable `created_at`, and updated value.
-5. Verify one safe structured error, such as a root path rejection, without touching unknown IDs.
-6. Read `/:id/version`.
-7. Delete the temporary ID and confirm a subsequent read returns `404`.
+5. Exercise full replacement and JSON Pointer GET aliases on the same disposable ID; verify response parity, version increments, and stable `created_at`.
+6. Verify a safe alias validation error, such as non-canonical padding, and confirm the response does not echo `data` or decoded JSON.
+7. Read `/:id/version` and verify mutation-like query parameters cannot alter it.
+8. Delete the temporary ID through the GET alias and confirm a subsequent read returns `404`.
 
 Production smoke tests must use a unique valid ID and delete it at the end. Do not inspect, overwrite, or delete unknown existing IDs.
 
 ## Testing Notes
 
-The test suite uses a JavaScript D1 mock. It covers the HTML documentation home, routing, CRUD behavior, set-by-pointer object and array semantics, strict pointer validation, structured conflicts, optimistic concurrency, versioning, legacy timestamps, ID validation, invalid JSON, invalid UTF-8, preservation of large numeric literals, body and result boundaries, CORS preflight, cache headers, and allowed methods.
+The test suite uses a JavaScript D1 mock. It covers the HTML documentation home, routing, CRUD behavior, strict GET alias grammar and boundaries, canonical base64url validation, alias/canonical parity, no-echo errors, route isolation, set-by-pointer object and array semantics, strict pointer validation, structured conflicts, optimistic concurrency, versioning, legacy timestamps, ID validation, invalid JSON, invalid UTF-8, preservation of large numeric literals, body and result boundaries, CORS preflight, cache headers, referrer policy, and allowed methods.
 
 Keep user-facing API documentation in `src/docs.js` synchronized with behavior changes. It must reference only `https://kv.helio.me`, clearly state that the API is public, and remain usable on desktop and mobile without external scripts, fonts, stylesheets, or assets.
 
@@ -216,4 +253,5 @@ Run `npx wrangler types` after changing bindings in `wrangler.jsonc`.
 - Do not mutate production D1 data except for explicit migrations and disposable smoke-test IDs.
 - Do not enable `workers_dev` or preview URLs without explicit approval and equivalent protection.
 - Do not treat CORS as authentication or access control.
+- Do not put secrets or sensitive data in GET alias URLs or publish mutating aliases as clickable links.
 - Do not assume WAF counters are globally exact; Cloudflare rate limiting is distributed and may be eventually consistent.

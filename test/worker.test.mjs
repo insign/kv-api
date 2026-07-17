@@ -290,6 +290,16 @@ test("serve documentação completa na raiz", async () => {
   );
   assert.match(html, /https:\/\/kv\.helio\.me/);
   assert.match(html, /API pública e sem autenticação/);
+  assert.match(html, /Compatibilidade via GET/);
+  assert.match(html, /GET \/meu-id\?method=GET/);
+  assert.match(html, /GET \/meu-id\?method=PUT&amp;data=eyJub21lIjoiQW5hIn0/);
+  assert.match(html, /GET \/meu-id\/value\?method=PUT&amp;path=%2Fnome&amp;data=IkJpYSI/);
+  assert.match(html, /GET \/meu-id\?method=DELETE/);
+  assert.match(html, /toString\("base64url"\)/);
+  assert.match(html, /new TextEncoder\(\)/);
+  assert.match(html, /10\.000 bytes/);
+  assert.match(html, /15\.000 bytes/);
+  assert.doesNotMatch(html, /<a\b[^>]*href=["'][^"']*method=(?:PUT|DELETE)/i);
   assert.match(html, /GET<\/span><code>\/:id\/version/);
   assert.match(html, /PUT<\/span><code>\/:id\/value\?path=/);
   assert.match(html, /URLSearchParams\(\{ path: "\/a~1b\/tema" \}\)/);
@@ -301,6 +311,14 @@ test("serve documentação completa na raiz", async () => {
     "INVALID_JSON",
     "INVALID_UTF8",
     "PAYLOAD_TOO_LARGE",
+    "DUPLICATE_METHOD_PARAMETER",
+    "INVALID_METHOD_PARAMETER",
+    "UNEXPECTED_QUERY_PARAMETER",
+    "MISSING_DATA_PARAMETER",
+    "DUPLICATE_DATA_PARAMETER",
+    "INVALID_DATA_ENCODING",
+    "QUERY_DATA_TOO_LARGE",
+    "URI_TOO_LONG",
     "MISSING_PATH_PARAMETER",
     "DUPLICATE_PATH_PARAMETER",
     "INVALID_JSON_POINTER",

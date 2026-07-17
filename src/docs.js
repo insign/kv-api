@@ -229,9 +229,10 @@ export const DOCS_HTML = `<!doctype html>
       <div class="version">API pública · v1</div>
       <nav aria-label="Navegação da documentação">
         <a href="#inicio">Visão geral</a>
-        <a href="#primeiros-passos">Primeiros passos</a>
-        <a href="#endpoints">Endpoints</a>
-        <a href="#atualizar-valor">Atualizar por caminho</a>
+         <a href="#primeiros-passos">Primeiros passos</a>
+         <a href="#endpoints">Endpoints</a>
+         <a href="#compatibilidade-get">Compatibilidade via GET</a>
+         <a href="#atualizar-valor">Atualizar por caminho</a>
         <a href="#respostas">Respostas</a>
         <a href="#javascript">JavaScript</a>
         <a href="#regras">Regras e limites</a>
@@ -258,7 +259,7 @@ export const DOCS_HTML = `<!doctype html>
       <section id="primeiros-passos">
         <div class="eyebrow">Quick start</div>
         <h2>Primeiros passos</h2>
-        <p>Crie ou substitua o documento completo com <code>PUT /:id</code>. Para alterar somente um valor, use <code>PUT /:id/value?path=...</code>. O corpo pode ser objeto, array, string, número, booleano ou <code>null</code>.</p>
+        <p>Crie ou substitua o documento completo com <code>PUT /:id</code>. Para alterar somente um valor, use <code>PUT /:id/value?path=...</code>. O corpo pode ser objeto, array, string, número, booleano ou <code>null</code>. Estes métodos canônicos são a opção recomendada; aliases via GET existem somente para clientes com limitação de método HTTP.</p>
 
         <h3>1. Salvar</h3>
         <pre><code>curl -X PUT https://kv.helio.me/minha_tarefa \\
@@ -305,6 +306,73 @@ export const DOCS_HTML = `<!doctype html>
           <div class="endpoint-head"><span class="method">OPTIONS</span><code>qualquer caminho</code></div>
           <div class="endpoint-body"><p>Responde ao preflight CORS. São permitidos os headers <code>Content-Type</code>, <code>Authorization</code>, <code>If-None-Match</code> e <code>If-Match</code>.</p></div>
         </article>
+      </section>
+
+      <section id="compatibilidade-get">
+        <div class="eyebrow">Restricted-client compatibility</div>
+        <h2>Compatibilidade via GET</h2>
+        <p>Clientes que só conseguem emitir <code>GET</code> podem transportar o comando em <code>method</code> e o valor JSON em <code>data</code>. Continue preferindo <code>PUT</code> e <code>DELETE</code> reais sempre que possível.</p>
+
+        <div class="notice">
+          <strong>GET com efeito colateral é perigoso.</strong> Prefetch, crawlers, previews, retries, caches e ferramentas de inspeção podem executar uma URL mutante sem intenção. Repetir a mesma URL executa uma nova mutação. Confirme a gravação por <code>version</code>, não pelo timestamp.
+        </div>
+
+        <h3>Contrato completo</h3>
+        <pre><code># Leitura atual e alias explícito
+GET /meu-id
+GET /meu-id?method=GET
+
+# Substituição completa
+GET /meu-id?method=PUT&amp;data=eyJub21lIjoiQW5hIn0
+
+# Alteração por JSON Pointer
+GET /meu-id/value?method=PUT&amp;path=%2Fnome&amp;data=IkJpYSI
+
+# Exclusão
+GET /meu-id?method=DELETE
+
+# Versão, sempre somente leitura
+GET /meu-id/version</code></pre>
+        <p><code>data</code> contém um valor JSON completo codificado em UTF-8 e depois em base64url canônico sem padding. <code>eyJub21lIjoiQW5hIn0</code> representa <code>{"nome":"Ana"}</code>; <code>IkJpYSI</code> representa a string JSON <code>"Bia"</code>.</p>
+
+        <h3>Gerar data no Node.js</h3>
+        <pre><code>const valor = { nome: "Ana" };
+const data = Buffer.from(JSON.stringify(valor), "utf8").toString("base64url");
+
+console.log(data); // eyJub21lIjoiQW5hIn0</code></pre>
+
+        <h3>Gerar data no navegador</h3>
+        <pre><code>function base64urlJson(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+const data = base64urlJson({ nome: "Ana" });</code></pre>
+
+        <h3>Gramática estrita</h3>
+        <ul>
+          <li><code>method</code>, <code>data</code> e seus valores são case-sensitive. Aceite somente <code>GET</code>, <code>PUT</code> e <code>DELETE</code> em maiúsculas nas rotas documentadas.</li>
+          <li>Em <code>GET /:id</code>, <code>method=GET</code> aceita somente <code>method</code>; <code>method=PUT</code> exige exatamente um <code>data</code>; <code>method=DELETE</code> aceita somente <code>method</code>.</li>
+          <li>Em <code>GET /:id/value</code>, somente <code>method=PUT</code> é válido, com exatamente um <code>method</code>, um <code>path</code> e um <code>data</code>.</li>
+          <li>Parâmetros duplicados ou não documentados são rejeitados. <code>GET /:id</code> sem o nome exato <code>method</code> continua sendo leitura e tolera queries alheias.</li>
+          <li><code>method</code> só altera uma requisição cujo método HTTP real é GET. Queries com esses nomes não reinterpretam um PUT ou DELETE real.</li>
+          <li><code>GET /:id/version</code> é sempre somente leitura. <code>GET /:id/value</code> sem <code>method</code> continua respondendo <code>405</code>.</li>
+        </ul>
+
+        <h3>Limites e exposição</h3>
+        <ul>
+          <li>O JSON decodificado de <code>data</code> aceita no máximo 10.000 bytes UTF-8; a forma codificada aceita no máximo 13.334 caracteres.</li>
+          <li>A URL absoluta de um alias mutante aceita no máximo 15.000 bytes. Host, ID, nomes de parâmetros, <code>path</code> percent-encoded e <code>data</code> compartilham esse orçamento; um caminho maior deixa menos espaço para <code>data</code>.</li>
+          <li>A plataforma Cloudflare aceita URLs de até 16 KB. Acima desse limite, a borda pode rejeitar a requisição antes do erro estruturado da API.</li>
+          <li>PUTs canônicos continuam aceitando corpos de até 1.900.000 bytes. O limite menor existe apenas para JSON transportado na URL.</li>
+          <li>Base64url é codificação, não criptografia. A URL pode aparecer em histórico, logs, analytics, proxies e referers. Não use aliases mutantes para senhas, tokens, dados pessoais ou qualquer segredo.</li>
+          <li><code>Cache-Control: no-store</code> e <code>Referrer-Policy: no-referrer</code> reduzem alguns riscos, mas não impedem execução automática, histórico ou logs intermediários.</li>
+        </ul>
       </section>
 
       <section id="atualizar-valor">
@@ -382,7 +450,7 @@ const response = await fetch(
 }</code></pre>
 
         <div class="grid">
-          <div class="card"><strong>version</strong><p>Começa em 1 e aumenta a cada <code>PUT</code> bem-sucedido, mesmo quando o valor enviado é igual.</p></div>
+          <div class="card"><strong>version</strong><p>Começa em 1 e aumenta a cada gravação bem-sucedida, inclusive aliases PUT via GET e valores que não mudam o resultado.</p></div>
           <div class="card"><strong>created_at</strong><p>Instante UTC da criação. Registros antigos podem retornar <code>null</code>.</p></div>
           <div class="card"><strong>updated_at</strong><p>Instante UTC da última gravação. Na criação, é igual a <code>created_at</code>. Registros antigos ainda não atualizados podem retornar <code>null</code>.</p></div>
           <div class="card"><strong>json</strong><p>Qualquer valor JSON válido, sem campos obrigatórios como <code>feito</code>.</p></div>
@@ -447,13 +515,16 @@ const updated = await fetch(
           <tbody>
             <tr><td>ID</td><td>De 1 a 100 caracteres: letras ASCII, números, hífen e sublinhado.</td></tr>
             <tr><td>Expressão</td><td><code>^[A-Za-z0-9_-]{1,100}$</code></td></tr>
-            <tr><td>Payload</td><td>Máximo de 1.900.000 bytes em UTF-8.</td></tr>
+             <tr><td>Payload</td><td>Máximo de 1.900.000 bytes em UTF-8.</td></tr>
+             <tr><td>Data via GET</td><td>Máximo de 10.000 bytes UTF-8 após decodificar base64url; máximo codificado de 13.334 caracteres.</td></tr>
+             <tr><td>URL mutante via GET</td><td>Máximo preventivo de 15.000 bytes na URL absoluta, abaixo do limite de 16 KB da plataforma.</td></tr>
             <tr><td>Resultado</td><td>Uma mutação por caminho também deve resultar em no máximo 1.900.000 bytes UTF-8.</td></tr>
             <tr><td>JSON Pointer</td><td>Máximo de 4.096 bytes UTF-8 após decodificar a URL e 64 segmentos; o caminho raiz é proibido.</td></tr>
             <tr><td>Aninhamento por caminho</td><td>O resultado aceita no máximo 1.000 níveis de objetos e arrays, conforme o limite do JSON1.</td></tr>
             <tr><td>Atualização</td><td><code>PUT /:id</code> substitui tudo; <code>PUT /:id/value</code> cria ou substitui exatamente um valor.</td></tr>
             <tr><td>Rate limit</td><td>30 requisições por IP a cada 10 segundos.</td></tr>
-            <tr><td>Cache</td><td>Respostas da API usam <code>Cache-Control: no-store</code>.</td></tr>
+             <tr><td>Cache</td><td>Respostas da API usam <code>Cache-Control: no-store</code>.</td></tr>
+             <tr><td>Referer</td><td>Respostas usam <code>Referrer-Policy: no-referrer</code> como mitigação parcial para dados na URL.</td></tr>
             <tr><td>CORS</td><td>Qualquer origem pode chamar a API; <code>OPTIONS</code> responde ao preflight.</td></tr>
             <tr><td>Autenticação</td><td>Nenhuma.</td></tr>
           </tbody>
@@ -475,7 +546,7 @@ pasta/item     # barra cria outro segmento de rota</code></pre>
       <section id="erros">
         <div class="eyebrow">Failures</div>
         <h2>Contrato de erros</h2>
-        <p>Falhas da API retornam JSON estruturado. <code>code</code> é estável para automação, <code>retryable</code> informa se repetir pode resolver o problema e <code>hint</code> sugere a próxima ação. Campos de contexto variam por código e nunca incluem o documento armazenado.</p>
+        <p>Falhas da API retornam JSON estruturado. <code>code</code> é estável para automação, <code>retryable</code> informa se repetir pode resolver o problema e <code>hint</code> sugere a próxima ação. Campos de contexto variam por código e nunca incluem o documento armazenado, <code>data</code>, seus bytes decodificados ou o JSON recebido.</p>
         <pre><code>{
   "error": "O caminho atravessa um valor que não é objeto nem array.",
   "code": "PATH_TYPE_CONFLICT",
@@ -495,9 +566,17 @@ pasta/item     # barra cria outro segmento de rota</code></pre>
               <tr><td><code>404</code></td><td><code>INVALID_ROUTE</code></td><td><code>path</code></td><td>Consulte <code>GET /</code> e corrija a rota.</td></tr>
               <tr><td><code>404</code></td><td><code>ITEM_NOT_FOUND</code></td><td><code>id</code></td><td>Confira o ID ou crie o item com <code>PUT /:id</code>.</td></tr>
               <tr><td><code>405</code></td><td><code>METHOD_NOT_ALLOWED</code></td><td>Cabeçalho <code>Allow</code></td><td>Use um dos métodos listados em <code>Allow</code>.</td></tr>
-              <tr><td><code>400</code></td><td><code>INVALID_JSON</code></td><td>Nenhum</td><td>Envie exatamente um valor JSON válido.</td></tr>
-              <tr><td><code>400</code></td><td><code>INVALID_UTF8</code></td><td>Nenhum</td><td>Codifique o corpo como UTF-8 válido.</td></tr>
-              <tr><td><code>413</code></td><td><code>PAYLOAD_TOO_LARGE</code></td><td><code>max_bytes</code> e, quando conhecido, <code>received_bytes</code></td><td>Reduza o corpo para no máximo 1.900.000 bytes.</td></tr>
+               <tr><td><code>400</code></td><td><code>INVALID_JSON</code></td><td>Nenhum</td><td>Envie exatamente um valor JSON válido.</td></tr>
+               <tr><td><code>400</code></td><td><code>INVALID_UTF8</code></td><td>Nenhum</td><td>Codifique o valor JSON como UTF-8 válido.</td></tr>
+               <tr><td><code>413</code></td><td><code>PAYLOAD_TOO_LARGE</code></td><td><code>max_bytes</code> e, quando conhecido, <code>received_bytes</code></td><td>Reduza o corpo para no máximo 1.900.000 bytes.</td></tr>
+               <tr><td><code>400</code></td><td><code>DUPLICATE_METHOD_PARAMETER</code></td><td><code>method_count</code></td><td>Envie exatamente um parâmetro <code>method</code>.</td></tr>
+               <tr><td><code>400</code></td><td><code>INVALID_METHOD_PARAMETER</code></td><td><code>accepted_methods</code></td><td>Use somente o valor <code>method</code> documentado para a rota.</td></tr>
+               <tr><td><code>400</code></td><td><code>UNEXPECTED_QUERY_PARAMETER</code></td><td><code>parameters</code>, sem valores</td><td>Remova todos os parâmetros não documentados para o comando.</td></tr>
+               <tr><td><code>400</code></td><td><code>MISSING_DATA_PARAMETER</code></td><td>Nenhum</td><td>Envie exatamente um <code>data</code> com JSON UTF-8 em base64url sem padding.</td></tr>
+               <tr><td><code>400</code></td><td><code>DUPLICATE_DATA_PARAMETER</code></td><td><code>data_count</code></td><td>Remova os parâmetros <code>data</code> extras.</td></tr>
+               <tr><td><code>400</code></td><td><code>INVALID_DATA_ENCODING</code></td><td><code>reason</code></td><td>Use base64url canônico sem padding, whitespace ou alfabeto base64 padrão.</td></tr>
+               <tr><td><code>413</code></td><td><code>QUERY_DATA_TOO_LARGE</code></td><td><code>max_bytes</code> e, quando conhecido, <code>received_bytes</code></td><td>Reduza o JSON decodificado de <code>data</code> para até 10.000 bytes.</td></tr>
+               <tr><td><code>414</code></td><td><code>URI_TOO_LONG</code></td><td><code>uri_bytes</code>, <code>max_uri_bytes</code></td><td>Reduza <code>data</code>, <code>path</code> ou o tamanho total da URL.</td></tr>
               <tr><td><code>400</code></td><td><code>MISSING_PATH_PARAMETER</code></td><td>Nenhum</td><td>Envie exatamente um parâmetro <code>path</code>.</td></tr>
               <tr><td><code>400</code></td><td><code>DUPLICATE_PATH_PARAMETER</code></td><td><code>path_count</code></td><td>Remova os parâmetros <code>path</code> extras.</td></tr>
               <tr><td><code>400</code></td><td><code>INVALID_JSON_POINTER</code></td><td><code>path</code>, <code>reason</code></td><td>Comece com <code>/</code> e use somente os escapes <code>~0</code> e <code>~1</code>.</td></tr>
